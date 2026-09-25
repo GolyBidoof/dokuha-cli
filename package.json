@@ -2,7 +2,7 @@
   "name": "manga-dl",
   "version": "0.0.2",
   "private": true,
-  "description": "Browserless headless CLI that downloads volumes from CMOA, ebookjapan and BookWalker, and can hand them to mokuro-bridge for OCR.",
+  "description": "Browserless headless CLI that downloads volumes from BookWalker, CMOA and ebookjapan, and can hand them to mokuro-bridge for OCR.",
   "license": "MIT",
   "repository": "https://github.com/GolyBidoof/bookwalker-ebookjapan-cmoa-native-headless-cli",
   "type": "module",

@@ -2,7 +2,7 @@
 
 <img width="1572" height="324" alt="image" src="https://github.com/user-attachments/assets/abca4f8e-0e52-45e8-878a-60be4176f87d" />
 
-**v0.0.1 — early, potentially buggy, and not ready for large-scale use.**
+**v0.0.2: early, potentially buggy, and not ready for large-scale use.**
 
 This is a first cut. It works on the volumes it has been tried against, but it has
 not been used broadly, the three stores can change their viewers without warning at
@@ -12,8 +12,8 @@ Please **do not point it at a large queue yet**. Start with one volume, check th
 output, and work up. If something breaks, a URL that reproduces it is the most
 useful thing you can report.
 
-A browserless, headless command line tool that downloads volumes from **CMOA**,
-**ebookjapan** and **BookWalker**, and can push them through
+A browserless, headless command line tool that downloads volumes from **BookWalker**,
+**CMOA** and **ebookjapan**, and can push them through
 [mokuro-bridge](https://github.com/) for OCR.
 
 No browser, no extension, no Puppeteer. It reads each store's own viewer API,
@@ -48,9 +48,13 @@ The honest list, so you can judge whether it will work for you:
 - **ebookjapan `--descramble` and `--pdf` do not work here.** They throw. The engine's
   descramble step runs its whole CLI at module scope and exits the process, which
   cannot be driven from a library. Use the engine directly for those.
-- **ebookjapan concurrency above 48 does nothing.** The engine sizes its keep-alive
-  socket pool from `process.argv` when it is first imported, so a higher
-  `--eb-concurrency` shares sockets instead of adding them.
+- **ebookjapan is capped at 48 sockets in flight.** The vendored engine sizes its
+  keep-alive pool by reading `--concurrency` out of `process.argv` when it is first
+  imported, and manga-dl does not translate its own flags into that one. So
+  `--concurrency N` does reach the engine and raises the pool, but `--eb-concurrency N`
+  on its own does not: past 48, requests queue on an agent that is still sized at 48.
+  Measured, 120 concurrent fetches peak at 48 sockets with no flag and at 8 with
+  `--concurrency 8`.
 - **BookWalker needs `sharp`**, an optional dependency, and needs a browser-supplied
   session for anything not free. See below.
 - **Store changes will break it.** These are undocumented viewer APIs; when a store
@@ -101,13 +105,15 @@ A `/vol/<n>/` in the URL always wins over `--cm-volume`.
 
 ### Concurrency
 
-Volumes start **all at once** by default. Queuing is nearly always the wrong trade:
-the stores are independent, CMOA's cost is CPU (so a queued volume just idles the
-machine) and the other two are I/O bound. Measured on a seven-volume batch, going
-from four at a time to all seven took **80.1s to 21.1s**.
+By default every volume in the batch starts at once, capped at 16. Queuing is nearly
+always the wrong trade: the stores are independent, CMOA's cost is CPU (so a queued
+volume just idles the machine) and the other two are I/O bound. Measured on a
+seven-volume batch, going from four at a time to all seven took **80.1s to 21.1s**.
 
 `--series N` caps it, and `--concurrency N` sets the per-store page concurrency in
-one go. Defaults: CMOA 12, ebookjapan 32, BookWalker 128 pages in flight.
+one go. Defaults: CMOA 12, ebookjapan 32, BookWalker 128 pages in flight. Page
+uploads to mokuro-bridge are not rate limited; they are bounded by
+`--push-concurrency` and by the bridge's own admission control.
 
 ## BookWalker credentials
 
@@ -176,7 +182,7 @@ src/detect.js           which store a URL belongs to
 src/display.js          the live progress display
 src/bridge.js           mokuro-bridge: push pages, poll OCR, finalize
 src/download/*.js       one adapter per store
-vendor/                 the three engines, copied verbatim; see vendor/README.md
+vendor/                 the three engines; see vendor/README.md for the deviations
 tests/                  test suite
 ```
 
@@ -233,13 +239,16 @@ rather than require the original checkout.
 
 MIT.
 
-The protocol work this tool depends on - the licence handshakes, the manifest
-layouts, the scramble tables and the decryption routines - was reverse engineered in
+The protocol work this tool depends on, meaning the licence handshakes, the manifest
+layouts, the scramble tables and the decryption routines, was reverse engineered in
 [bookwalker-ebookjapan-cmoa-native-downloader](https://github.com/GolyBidoof/bookwalker-ebookjapan-cmoa-native-downloader).
 Credit for it belongs to that project.
 
-The engines under `vendor/` are copies of that work and of its sibling Node code; see
-[vendor/README.md](vendor/README.md) for exactly what was changed in each.
+The engines under `vendor/` are copies of that work and of its sibling Node code. Two
+of them are no longer byte for byte identical to their originals: each carries
+deliberate, documented throughput fixes with the reasoning and the measurements
+written into the source. See [vendor/README.md](vendor/README.md) for exactly what
+changed in each.
 
 Built with assistance from **DeepSeek V4.1**, which wrote and reviewed the driver,
 the option parser, the progress display and the test suite.
