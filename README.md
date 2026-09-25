@@ -195,6 +195,9 @@ The default suite is hermetic and makes no network calls.
 MIT. The store engines under `vendor/` are vendored copies of code by the same
 author; see [vendor/README.md](vendor/README.md) for exactly what was changed.
 
+Built with assistance from **DeepSeek V4.1**, which wrote and reviewed the driver,
+the option parser, the progress display and the test suite.
+
 This tool is for downloading material you have the right to download. It does not
 defeat any access control you have not already been granted: it uses the same
 signed URLs your browser receives, and free volumes need no credentials at all.
