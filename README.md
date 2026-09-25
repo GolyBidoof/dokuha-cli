@@ -1,4 +1,4 @@
-# manga-dl
+# bookwalker-ebookjapan-cmoa-native-headless-cli
 
 <img width="1572" height="324" alt="image" src="https://github.com/user-attachments/assets/abca4f8e-0e52-45e8-878a-60be4176f87d" />
 
@@ -50,7 +50,7 @@ The honest list, so you can judge whether it will work for you:
   cannot be driven from a library. Use the engine directly for those.
 - **ebookjapan is capped at 48 sockets in flight.** The vendored engine sizes its
   keep-alive pool by reading `--concurrency` out of `process.argv` when it is first
-  imported, and manga-dl does not translate its own flags into that one. So
+  imported, and this CLI does not translate its own flags into that one. So
   `--concurrency N` does reach the engine and raises the pool, but `--eb-concurrency N`
   on its own does not: past 48, requests queue on an agent that is still sized at 48.
   Measured, 120 concurrent fetches peak at 48 sockets with no flag and at 8 with
@@ -65,8 +65,8 @@ The honest list, so you can judge whether it will work for you:
 Requires Node 20 or newer.
 
 ```sh
-git clone <this repo> manga-dl
-cd manga-dl
+git clone https://github.com/GolyBidoof/bookwalker-ebookjapan-cmoa-native-headless-cli
+cd bookwalker-ebookjapan-cmoa-native-headless-cli
 npm install          # optional; only needed for BookWalker
 ```
 
