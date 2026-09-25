@@ -1,5 +1,7 @@
 # manga-dl
 
+<img width="1572" height="324" alt="image" src="https://github.com/user-attachments/assets/abca4f8e-0e52-45e8-878a-60be4176f87d" />
+
 **v0.0.1 — early, potentially buggy, and not ready for large-scale use.**
 
 This is a first cut. It works on the volumes it has been tried against, but it has
