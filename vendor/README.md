@@ -4,11 +4,18 @@
 already existed, copied here verbatim so a fresh clone runs with no sibling
 checkouts.
 
-| Directory | Origin | Module system | Updated by |
+| Directory | Origin | Module system | Derived from |
 |---|---|---|---|
-| `cmoa/` | `cmoa_headless` from the CMOA work tree | ESM | upstream, then copied |
-| `ebookjapan/` | `ebookjapan_headless` from the CMOA work tree | ESM | upstream, then copied |
-| `bookwalker/` | `bookwalker-native-cli/cli` | CommonJS | upstream, then copied |
+| `cmoa/` | `cmoa_headless` in the CMOA work tree | ESM | that work tree, by the same author |
+| `ebookjapan/` | `ebookjapan_headless` in the CMOA work tree | ESM | that work tree, by the same author |
+| `bookwalker/` | `bookwalker-native-cli/cli` | CommonJS | the userscript repo's BookWalker logic, extracted to Node |
+
+None of the three is a published repository. The two CMOA-work-tree engines were
+written for Node, and the sampler was extracted from
+[bookwalker-ebookjapan-cmoa-native-downloader](https://github.com/GolyBidoof/bookwalker-ebookjapan-cmoa-native-downloader)
+when its CLI was split out at that project's v2.0.0. The userscript repo's own
+`src/sites/cmoa/` and `src/sites/ebookjapan/` solve the same problems in a browser
+and are the source of the algorithms, not of these files.
 
 ## Updating a vendored engine
 

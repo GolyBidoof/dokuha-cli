@@ -190,10 +190,56 @@ MANGA_DL_TEST_NETWORK=1 npm test    # adds the tests that hit real stores
 
 The default suite is hermetic and makes no network calls.
 
+## Relationship to the userscript downloader
+
+The sibling project
+[**bookwalker-ebookjapan-cmoa-native-downloader**](https://github.com/GolyBidoof/bookwalker-ebookjapan-cmoa-native-downloader)
+covers the same three stores and speaks to the same endpoints. The difference is
+where the code runs:
+
+| | Userscript downloader | This tool |
+|---|---|---|
+| Runs in | your browser, as a userscript | Node, headless |
+| Drives | the store's own page, in a tab | the store's API, over HTTP |
+| Decryption | the same algorithms | the same algorithms |
+| You see | a browser window doing the work | a terminal |
+
+**They share the same reverse-engineering work, not one codebase.** The cid-to-URL
+derivation, the licence handshake parameters, the manifest layout, the scramble
+tables and the decryption routines were each worked out once. Both projects use the
+results, because there is only one correct answer to what a store's viewer does.
+
+How much code is literally shared varies by store, and it is worth being precise:
+
+- **BookWalker: the same code.** The decryption in this repo's
+  `vendor/bookwalker/bw-crypto.js` is identical to the userscript's
+  `src/sites/bookwalker/03-crypto.js`, down to the decompiler-assigned names (`A8j`,
+  `a0g`, `A3b`, `B0p`). For that store this repo genuinely reuses the userscript's
+  implementation rather than reproducing it.
+- **CMOA and ebookjapan: the same algorithms, separate implementations.** The
+  userscript reads pages out of the page it is running in; these engines call the
+  store APIs directly and descramble in Node, which is a different enough job that
+  the code was written afresh. The tables, tokens and descrambling are the same,
+  because they have to be.
+
+The practical consequence is the same either way: when a store changes something, the
+answer is discovered once and both projects need the same correction.
+
+**Credit for the protocol work belongs to that project.** It is why this repo's
+engines are vendored rather than assumed: a fresh clone should reproduce that work
+rather than require the original checkout.
+
 ## Credits and licence
 
-MIT. The store engines under `vendor/` are vendored copies of code by the same
-author; see [vendor/README.md](vendor/README.md) for exactly what was changed.
+MIT.
+
+The protocol work this tool depends on - the licence handshakes, the manifest
+layouts, the scramble tables and the decryption routines - was reverse engineered in
+[bookwalker-ebookjapan-cmoa-native-downloader](https://github.com/GolyBidoof/bookwalker-ebookjapan-cmoa-native-downloader).
+Credit for it belongs to that project.
+
+The engines under `vendor/` are copies of that work and of its sibling Node code; see
+[vendor/README.md](vendor/README.md) for exactly what was changed in each.
 
 Built with assistance from **DeepSeek V4.1**, which wrote and reviewed the driver,
 the option parser, the progress display and the test suite.
