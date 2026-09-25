@@ -21,9 +21,27 @@ import https from 'node:https';
  * than returning 429, so pacing is our job. These are deliberately conservative:
  * the measured cost of a push is only a few ms, so a small inter-request cooldown
  * costs almost nothing in wall time while keeping us from hammering the server.
+ *
+ * VENDORED DEVIATION. The reasoning above is right about a single push and wrong
+ * about a volume, and the gap is the whole cost of an upload phase. A cooldown
+ * between request *starts* is a global serialisation, so its total cost is
+ * `pages x minIntervalMs` and is independent of how fast each push is -- the
+ * cheapness of an individual push is exactly what made the floor dominate.
+ * Measured on a local bridge: 60 ms/page, i.e. 16.7 pages/s for the whole process
+ * no matter what --push-concurrency said, giving 15 s of dead time before OCR
+ * could start on a 244-page volume and ~4 minutes across a 16-volume batch;
+ * 1.2 s and 19 s with the floor off the upload path (11-13x, and the 1768 KB
+ * fixture used for that is larger than a real page, so it is the conservative
+ * end). The gate itself has been removed rather than made opt-out, because its
+ * only caller was `retrying` and `retrying`'s only caller was `pushPage` -- the
+ * control-plane calls never took it, so there was nothing left to pace. Pressure
+ * is bounded the way the bridge actually cares about: by the caller's page
+ * concurrency, by the bridge's own upload admission semaphore, and by the
+ * 429/5xx backoff, none of which changed. `minIntervalMs` is kept only so the
+ * documented constant does not silently vanish; nothing reads it.
  */
 export const COOLDOWN = {
-  minIntervalMs: 60,      // floor between consecutive bridge requests
+  minIntervalMs: 60,      // UNUSED: see the deviation note above
   pushConcurrency: 4,     // parallel page pushes
   retryBaseMs: 250,       // backoff base for 429/5xx
   retryMaxMs: 15000,
@@ -66,18 +84,13 @@ export async function discoverBridge(explicit, { timeoutMs = 3000 } = {}) {
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 8, maxFreeSockets: 4 });
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 8, maxFreeSockets: 4 });
 
-/** Serialises request starts so we never exceed COOLDOWN.minIntervalMs. */
-let lastRequestAt = 0;
-let gate = Promise.resolve();
-function pace() {
-  const p = gate.then(async () => {
-    const wait = COOLDOWN.minIntervalMs - (Date.now() - lastRequestAt);
-    if (wait > 0) await new Promise(r => setTimeout(r, wait));
-    lastRequestAt = Date.now();
-  });
-  gate = p.catch(() => {});
-  return p;
-}
+// VENDORED DEVIATION: the global start-rate gate that used to live here is gone,
+// and neither COOLDOWN.minIntervalMs nor this comment should be read as evidence
+// that it is still applied. Its only caller was `retrying`, whose only caller was
+// `pushPage`, so on a real run the floor did nothing but serialise uploads; the
+// control-plane calls (session/start, status, finalize) never went through it.
+// Anything that re-adds a per-request floor here must first explain why the
+// measurement in the COOLDOWN note does not apply.
 
 const sleepMs = ms => new Promise(r => setTimeout(r, ms));
 
@@ -135,13 +148,16 @@ function multipart(fields, files) {
 }
 
 /**
- * Run `fn` under the pacing gate, retrying 429/5xx with exponential backoff and
- * jitter (honouring Retry-After when the bridge sends one).
+ * Run `fn`, retrying 429/5xx with exponential backoff and jitter (honouring
+ * Retry-After when the bridge sends one).
+ *
+ * Pressure on the bridge is handled here and by the caller's concurrency, not by
+ * a global start-rate floor; see the COOLDOWN note for why that floor was
+ * removed from page uploads.
  */
 async function retrying(label, fn) {
   let lastErr;
   for (let a = 0; a <= COOLDOWN.retries; a++) {
-    await pace();
     try {
       return await fn();
     } catch (e) {
@@ -204,6 +220,9 @@ export class BridgeClient {
     const { body, contentType: ct } = multipart(
       { filename: safe, page_num: String(pageNumber || 0) },
       [{ name: 'page', filename: safe, data, contentType }]);
+    // No start-rate floor here. This is the bulk path -- one call per page, on
+    // every volume -- so a floor between starts caps the whole process at
+    // 1000/minIntervalMs pages per second regardless of --push-concurrency.
     return retrying(`page ${pageNumber}`, async () => {
       const r = await request(this.baseUrl, 'POST', `/session/${encodeURIComponent(sessionId)}/page`,
         { body, headers: { 'Content-Type': ct }, timeoutMs, json: true });

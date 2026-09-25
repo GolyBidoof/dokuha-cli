@@ -127,4 +127,56 @@ import { check, checkEqual, finish } from './_harness.mjs';
     check('reuseExisting can be switched off', asked.reuseExisting === false, JSON.stringify(asked));
 }
 
+// Uploads must not be serialised by the client's start-rate floor.
+//
+// COOLDOWN.minIntervalMs is a floor between *consecutive request starts*, so if
+// it is applied per page the whole process is capped at 1000/minIntervalMs pages
+// per second no matter what --push-concurrency says. That is what it used to do:
+// 60 ms/page measured, i.e. 15 s of dead time before OCR could begin on a
+// 244-page volume. This pins the fix behaviourally against a stub bridge, so it
+// fails if anyone ever puts pushPage back under the gate.
+{
+    const http = await import('node:http');
+    const { BridgeClient, COOLDOWN } = await import('../vendor/ebookjapan/bridge.mjs');
+
+    const seen = [];
+    const server = http.createServer((req, res) => {
+        seen.push(req.url);
+        req.resume();
+        req.on('end', () => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end('{"ok":true}');
+        });
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const port = server.address().port;
+
+    try {
+        const client = new BridgeClient(`http://127.0.0.1:${port}`);
+        const N = 24;
+        const floor = N * COOLDOWN.minIntervalMs;   // what a paced run would cost
+        const body = Buffer.alloc(4096, 7);
+
+        const t0 = performance.now();
+        const results = await Promise.all(
+            Array.from({ length: N }, (_, i) =>
+                client.pushPage('s1', body, `page_${i}.webp`, i).then(() => true).catch(() => false)),
+        );
+        const ms = performance.now() - t0;
+
+        check('every page in the unpaced batch is still accepted',
+            results.every(Boolean), JSON.stringify(results.filter((r) => !r).length) + ' failed');
+        check('every page reached the bridge',
+            seen.filter((u) => /\/page$/.test(u)).length === N,
+            seen.length + ' request(s) seen');
+        // Loose by a wide margin: the point is that N requests do not cost N
+        // floors, not that the stub is fast. A paced run cannot beat this bound.
+        check('page uploads are not serialised by the start-rate floor',
+            ms < floor / 2,
+            `${N} pushes in ${ms.toFixed(0)}ms; a paced run would need ${floor}ms`);
+    } finally {
+        await new Promise((r) => server.close(r));
+    }
+}
+
 finish();

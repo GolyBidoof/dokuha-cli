@@ -183,7 +183,9 @@ export async function downloadCmoa(task, ctx) {
 
     const result = await downloadVolume(volume, {
         outDir: folder,
-        concurrency: ctx.concurrency,
+        // `cmoaConcurrency` is the store's own key; `concurrency` is the older
+        // shared one, still honoured so a direct caller keeps working.
+        concurrency: ctx.cmoaConcurrency ?? ctx.concurrency,
         jobs: ctx.jobs,
         force: ctx.force,
         format: ctx.format,

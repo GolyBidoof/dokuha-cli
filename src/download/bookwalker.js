@@ -17,6 +17,7 @@ import { createRequire } from 'node:module';
 
 import { startBridgeSession } from '../bridge.js';
 import { safeFolderName } from './cmoa.js';
+import { BwNormalizePool, defaultNormalizeWorkers } from './bw-normalize-pool.js';
 
 // The sampler is CommonJS, so it is loaded through require rather than imported.
 const require = createRequire(import.meta.url);
@@ -160,26 +161,46 @@ export async function downloadBookwalker(task, ctx) {
     // OCR'd are counted as cache hits rather than uploads.
     const tolerant = wantOcr ? new TolerantBridge(new BwBridgeClient({ baseUrl: ctx.bridge.baseUrl })) : null;
 
-    const result = await runPublicTrialJob({
-        url: task.target,
-        bridge: tolerant || undefined,
-        session: {
-            cid: task.cid,
-            apiHost: 'https://viewer.bookwalker.jp',
-            auth,
-            baseUrl,
-            cti: payload.cti || null,
-            isTrial: false,
-        },
-        configBody,
-        outputDir: folder,
-        ocr: wantOcr,
-        bridgeUrl: wantOcr ? ctx.bridge.baseUrl : null,
-        reuseExisting: true,
-        pageConcurrency: config.bwConcurrency,
-        pageUploadConcurrency: config.pushConcurrency,
-        onProgress: (event) => reportBookwalker(event, task, progress),
-    });
+    // Encrypted pages are un-permuted and re-encoded in worker threads instead
+    // of on the event loop that drives the fetches. The guard is deliberately
+    // the same one the inline path uses: a plaintext manifest, or a page with no
+    // seeds, must be handed straight back rather than decoded and re-encoded --
+    // otherwise the pool would cost more than it saves on unencrypted books.
+    const normalizer = new BwNormalizePool(
+        Number(ctx.normalizeWorkers) > 0 ? Number(ctx.normalizeWorkers) : defaultNormalizeWorkers(),
+    );
+    const normalizePage = (data, job, manifest) => {
+        if (manifest.decoded.plaintext || !job.seeds) return data;
+        return normalizer.normalize(data, job.seeds);
+    };
+
+    let result;
+    try {
+        result = await runPublicTrialJob({
+            url: task.target,
+            bridge: tolerant || undefined,
+            session: {
+                cid: task.cid,
+                apiHost: 'https://viewer.bookwalker.jp',
+                auth,
+                baseUrl,
+                cti: payload.cti || null,
+                isTrial: false,
+            },
+            configBody,
+            outputDir: folder,
+            ocr: wantOcr,
+            bridgeUrl: wantOcr ? ctx.bridge.baseUrl : null,
+            reuseExisting: true,
+            pageConcurrency: ctx.bwConcurrency ?? config.bwConcurrency,
+            pageUploadConcurrency: config.pushConcurrency,
+            normalizePage,
+            onProgress: (event) => reportBookwalker(event, task, progress),
+        });
+    } finally {
+        // Never leave workers behind on a failed or cancelled volume.
+        await normalizer.close();
+    }
 
     const record = {
         store: 'bookwalker',

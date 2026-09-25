@@ -136,8 +136,11 @@ export async function downloadEbookjapan(task, ctx = {}) {
             'which cannot be loaded in-process');
     }
 
+    // `ebConcurrency` is the store's own key from the CLI; `concurrency` is this
+    // function's documented standalone parameter. The store's key wins, because
+    // reading only `concurrency` is what made --eb-concurrency a no-op.
     const concurrency = Math.max(1, Math.min(MAX_CONCURRENCY,
-        Number(ctx.concurrency) || DEFAULT_CONCURRENCY));
+        Number(ctx.ebConcurrency ?? ctx.concurrency) || DEFAULT_CONCURRENCY));
     // `null` and `undefined` both mean "use the engine's own default".
     const wanted = ctx.retries === undefined || ctx.retries === null ? DEFAULT_RETRIES : Number(ctx.retries);
     const retries = Number.isFinite(wanted) ? Math.max(0, wanted) : DEFAULT_RETRIES;

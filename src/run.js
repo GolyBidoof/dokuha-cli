@@ -13,6 +13,7 @@ import { LiveProgress } from './display.js';
 import { resolveCmoaInput, downloadCmoa } from './download/cmoa.js';
 import { downloadEbookjapan } from './download/ebookjapan.js';
 import { downloadBookwalker } from './download/bookwalker.js';
+import { defaultJobCount } from '../vendor/cmoa/src/render_pool.js';
 import { connectBridge, pushToBridge } from './bridge.js';
 import { resolveDestination, describeDestinations } from '../vendor/ebookjapan/bridge.mjs';
 
@@ -191,9 +192,22 @@ export async function run(positionals, config, io = {}) {
     // series x cores. ebookjapan and BookWalker render nothing, so they are not
     // part of this calculation.
     const cmoaCount = tasks.filter((t) => t.kind === 'cmoa').length;
-    const jobs = config.jobs ?? undefined;
     const series = config.series ?? Math.min(tasks.length, 16);
     const concurrentCmoa = Math.max(1, Math.min(series, cmoaCount));
+    // An explicit --jobs wins; otherwise the engine's own default (cores - 1) is
+    // split across the volumes that actually run at once. This must be a number:
+    // leaving it undefined falls through to downloadVolume's `jobs = 1`
+    // destructuring default, which silently renders a whole volume on one
+    // thread. The engine's own benchmark is the reason it matters -- 244 pages
+    // take ~44s on one render thread against ~8.6s on a full pool, because
+    // rendering is ~18x the cost of fetching (vendor/cmoa/README.md).
+    const renderJobs = config.jobs ?? Math.max(1, Math.floor(defaultJobCount() / concurrentCmoa));
+    // BookWalker's encrypted pages are un-permuted in worker threads, so it gets
+    // its own slice of the same machine-wide budget. Nothing else in the three
+    // engines runs CPU work per page on a pool, so the two do not overlap in
+    // practice; the division keeps a 16-volume batch from starting 16 pools.
+    const concurrentSeries = Math.max(1, series);
+    const normalizeWorkers = Math.max(1, Math.floor(defaultJobCount() / concurrentSeries));
 
     let bridge = null;
     if (config.mokuro) {
@@ -215,8 +229,17 @@ export async function run(positionals, config, io = {}) {
         bridge,
         config,
         userAgent: USER_AGENT,
-        concurrency: config.cmConcurrency,
-        jobs: jobs ?? undefined,
+        // One key per store, and each adapter reads its own. A single shared
+        // `concurrency` used to feed every store from `cmConcurrency`, which
+        // silently made --eb-concurrency dead and ran ebookjapan at the CMOA
+        // default. `concurrency` is kept because ebookjapan documents it as its
+        // own parameter, but it is now the ebookjapan value, not CMOA's.
+        concurrency: config.ebConcurrency,
+        cmoaConcurrency: config.cmConcurrency,
+        ebConcurrency: config.ebConcurrency,
+        bwConcurrency: config.bwConcurrency,
+        jobs: renderJobs,
+        normalizeWorkers,
         force: config.force,
         format: config.format,
         quality: config.quality,

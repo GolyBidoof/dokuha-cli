@@ -55,7 +55,7 @@ export const OPTIONS = [
 
     // Concurrency
     { name: 'series', type: 'string', arg: 'N', group: 'Concurrency', help: `volumes at once (default: all of them, up to ${DEFAULTS.seriesCap})` },
-    { name: 'jobs', type: 'string', arg: 'N', group: 'Concurrency', help: 'render workers across all CMOA volumes (default: cores - 1)' },
+    { name: 'jobs', type: 'string', arg: 'N', group: 'Concurrency', help: 'render workers across all CMOA volumes (default: cores - 1, divided by the volumes running at once)' },
     { name: 'concurrency', type: 'string', arg: 'N', group: 'Concurrency', help: 'set the per-store page concurrency at once' },
     { name: 'cm-concurrency', type: 'string', arg: 'N', group: 'Concurrency', help: `CMOA pages in flight (default ${DEFAULTS.cmConcurrency})` },
     { name: 'eb-concurrency', type: 'string', arg: 'N', group: 'Concurrency', help: `ebookjapan pages in flight (default ${DEFAULTS.ebConcurrency})` },
