@@ -1,0 +1,24 @@
+{
+  "name": "cmoa-headless",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Headless, browserless downloader for CMOA (コミックシーモア) speed-reader volumes",
+  "type": "module",
+  "bin": {
+    "cmoa-headless": "./bin/cmoa-headless.mjs"
+  },
+  "exports": {
+    ".": "./src/downloader.js",
+    "./codec": "./src/codec.js",
+    "./protocol": "./src/protocol.js",
+    "./descrambler": "./src/descrambler.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {},
+  "scripts": {
+    "test": "node test/run.mjs",
+    "start": "node ./bin/cmoa-headless.mjs"
+  }
+}

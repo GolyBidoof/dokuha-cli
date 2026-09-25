@@ -1,0 +1,4 @@
+{
+  "//": "The vendored sampler is upstream CommonJS and is kept byte-identical. This marker tells Node to treat it as such inside a package that is otherwise ESM.",
+  "type": "commonjs"
+}

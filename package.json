@@ -1,0 +1,21 @@
+{
+  "name": "manga-dl",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browserless headless CLI that downloads volumes from CMOA, ebookjapan and BookWalker, and can hand them to mokuro-bridge for OCR.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "manga-dl": "bin/manga-dl.mjs"
+  },
+  "scripts": {
+    "test": "node tests/run.mjs",
+    "engines:test": "node vendor/cmoa/test/run.mjs"
+  },
+  "optionalDependencies": {
+    "sharp": "^0.34.5"
+  }
+}

@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Downloaded content. This tool writes whole volumes of copyrighted material;
+# a default run must never be committable.
+library/
+out/
+*.mokuro
+*.zip
+*.cbz
+
+# Captures and diagnostics
+*.har
+*.log
+
+# Session and licence material
+.bwdd-cli/
+.bw-session.json
+free-session.json
+licence-*.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local overrides
+.env
