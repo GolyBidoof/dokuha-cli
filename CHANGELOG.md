@@ -1,8 +1,14 @@
 # Changelog
 
-## v0.1.0
+## v0.0.1
 
-First release. A browserless CLI that drives three store engines vendored in-tree.
+First release, and an early one. A browserless CLI that drives three store engines
+vendored in-tree.
+
+This is a 0.0.x on purpose: it is verified against a small number of volumes, it has
+no store-aware retry strategy, and the stores can change their viewers at any time.
+The README lists the known limitations. Start with a single volume before pointing it
+at a queue.
 
 Added:
 

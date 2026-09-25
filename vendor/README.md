@@ -47,6 +47,14 @@ was repointed at the new location.
 
 `bin/`, `.npmcache/` and the vendored `.gitignore` were dropped as packaging noise.
 
+`src/downloader.js` changed by one line. `fetchPage` already accepted a `retries`
+option and `openVolume` already forwarded the caller's budget to its two metadata
+calls, but `downloadVolume` called `fetchPage` with `{ quality }` only. The retry
+budget therefore applied to opening a volume and not to downloading its pages, which
+is the opposite of useful: page fetches are the ones that fail. The call now passes
+`retries` through as well. This one is a genuine engine bug, so it should be fixed
+upstream and this note deleted when the engine is next refreshed.
+
 ### `ebookjapan/`
 
 Unmodified.

@@ -33,6 +33,18 @@ export function cmoaCid(titleId, volume) {
     return `${String(titleId).padStart(10, '0')}_jp_${String(volume).padStart(4, '0')}`;
 }
 
+/**
+ * Retry and timeout options for a single CMOA request.
+ *
+ * Passing `undefined` lets the engine apply its own default rather than this
+ * adapter inventing one, which keeps `--retries` an override instead of a
+ * second, quietly-different policy.
+ */
+function retryOptions(ctx) {
+    if (ctx?.retries == null) return {};
+    return { retries: ctx.retries };
+}
+
 /** The viewer URL CMOA itself uses, kept identical so nothing downstream differs. */
 export function cmoaViewerUrl(cid, returnUrl) {
     const back = returnUrl ? `&rurl=${encodeURIComponent(returnUrl)}` : '';
@@ -51,10 +63,10 @@ export function cmoaViewerUrl(cid, returnUrl) {
  *   "not downloadable". Transient network errors are rethrown rather than
  *   swallowed, so a flaky request is never mistaken for the end of a series.
  */
-export async function probeCmoaVolume(cid) {
+export async function probeCmoaVolume(cid, ctx = {}) {
     let volume;
     try {
-        volume = await openVolume(cid);
+        volume = await openVolume(cid, retryOptions(ctx));
     } catch (error) {
         if (/result=-120|unavailable, expired, or the cid is wrong/i.test(error.message)) return null;
         throw error;
@@ -79,13 +91,13 @@ export async function probeCmoaVolume(cid) {
  *
  * The list is not published anywhere, so it is discovered by probing in batches.
  */
-export async function scanCmoaTitle(titleId, limit) {
+export async function scanCmoaTitle(titleId, limit, scanCtx = {}) {
     const found = [];
     let misses = 0;
     for (let base = 1; base <= limit && misses < MISS_LIMIT; base += PROBE_CONCURRENCY) {
         const batch = [];
         for (let v = base; v < base + PROBE_CONCURRENCY && v <= limit; v++) {
-            batch.push(probeCmoaVolume(cmoaCid(titleId, v)).then((r) => ({ v, r })));
+            batch.push(probeCmoaVolume(cmoaCid(titleId, v), scanCtx).then((r) => ({ v, r })));
         }
         const settled = (await Promise.all(batch)).sort((a, b) => a.v - b.v);
         for (const { v, r } of settled) {
@@ -135,7 +147,7 @@ export async function resolveCmoaInput(det, config, input) {
 
     if (wanted) return { tasks: wanted.map((v) => make(v, cmoaCid(det.titleId, v))), rejected: [] };
 
-    const found = await scanCmoaTitle(det.titleId, config.cmScanLimit);
+    const found = await scanCmoaTitle(det.titleId, config.cmScanLimit, { retries: config.retries });
     if (!found.length) {
         return {
             tasks: [],
@@ -153,7 +165,7 @@ export async function resolveCmoaInput(det, config, input) {
  * @returns {Promise<object>} a uniform store record
  */
 export async function downloadCmoa(task, ctx) {
-    const volume = await openVolume(task.cid);
+    const volume = await openVolume(task.cid, retryOptions(ctx));
     const title = volume.subtitle || task.cid;
 
     // Surface the real title immediately: opening the volume costs a round trip,

@@ -284,7 +284,9 @@ export async function downloadVolume(volume, options) {
       const page = volume.pages[job.index];
       const started = Date.now();
       try {
-        const raw = await volume.fetchPage(page, { quality });
+        // Retries are forwarded so the caller's budget applies to page fetches
+        // too, not only to the metadata calls in openVolume.
+        const raw = await volume.fetchPage(page, { quality, retries: options.retries });
         const tables = volume.tablesFor(page);
         const rendered = await render(raw, tables);
         // `original` may hand back either the CDN bytes or a re-encoded page, so

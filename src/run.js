@@ -220,6 +220,9 @@ export async function run(positionals, config, io = {}) {
         force: config.force,
         format: config.format,
         quality: config.quality,
+        // Read by both the CMOA and ebookjapan adapters; BookWalker's sampler has
+        // its own internal retry loop and does not take a budget.
+        retries: config.retries,
     };
 
     const started = performance.now();

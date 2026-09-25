@@ -1,5 +1,15 @@
 # manga-dl
 
+**v0.0.1 — early, potentially buggy, and not ready for large-scale use.**
+
+This is a first cut. It works on the volumes it has been tried against, but it has
+not been used broadly, the three stores can change their viewers without warning at
+any time, and error handling on unusual input is thin. Expect rough edges.
+
+Please **do not point it at a large queue yet**. Start with one volume, check the
+output, and work up. If something breaks, a URL that reproduces it is the most
+useful thing you can report.
+
 A browserless, headless command line tool that downloads volumes from **CMOA**,
 **ebookjapan** and **BookWalker**, and can push them through
 [mokuro-bridge](https://github.com/) for OCR.
@@ -18,6 +28,31 @@ node bin/manga-dl.mjs \
 
 Volumes run in parallel. Paste whatever URL the site shows you; the store is
 detected automatically.
+
+## Status and known limitations
+
+The honest list, so you can judge whether it will work for you:
+
+- **Verified against a small number of volumes.** Three stores, roughly a dozen
+  titles. Anything unusual (a region-restricted title, an odd page layout, a
+  multi-chapter manifest) is untested.
+- **Retries are a flat budget, not adaptive backoff.** `--retries N` sets how many
+  attempts each page gets, but there is no store-aware backoff, no circuit breaking,
+  and no resume across runs beyond skipping pages that are already on disk. A long
+  flaky run produces failures rather than a slow success.
+- **A failed volume does not stop the batch**, and there is no automatic re-run of
+  the failures. Check the summary, then re-run the same command: finished pages are
+  skipped.
+- **ebookjapan `--descramble` and `--pdf` do not work here.** They throw. The engine's
+  descramble step runs its whole CLI at module scope and exits the process, which
+  cannot be driven from a library. Use the engine directly for those.
+- **ebookjapan concurrency above 48 does nothing.** The engine sizes its keep-alive
+  socket pool from `process.argv` when it is first imported, so a higher
+  `--eb-concurrency` shares sockets instead of adding them.
+- **BookWalker needs `sharp`**, an optional dependency, and needs a browser-supplied
+  session for anything not free. See below.
+- **Store changes will break it.** These are undocumented viewer APIs; when a store
+  changes its viewer, this stops working until the engine is updated.
 
 ## Install
 
