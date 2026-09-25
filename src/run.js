@@ -23,7 +23,7 @@ import { resolveDestination, describeDestinations } from '../vendor/ebookjapan/b
  * otherwise inexplicable refusals, and the four stores drift at different times.
  * Overridable so a breakage can be worked around without a release.
  */
-const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
+const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36';
 
 /**
  * Build the task list from positional arguments.

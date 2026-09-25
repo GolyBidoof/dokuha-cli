@@ -75,8 +75,7 @@ export const OPTIONS = [
 
     // BookWalker auth
     { name: 'bw-cookie', type: 'string', arg: 'TEXT', multiple: true, group: 'BookWalker auth', help: 'Cookie header, "Copy as cURL" command, @FILE, a path, or "-" for stdin. Repeatable and merged' },
-    { name: 'bw-profile', type: 'string', arg: 'DIR', group: 'BookWalker auth', default: '~/.manga-dl/profile', help: 'signed-in Chrome profile to reuse' },
-    { name: 'bw-login', type: 'boolean', group: 'BookWalker auth', help: 'open a browser once to sign in, then save the session (needs a browser; this build has none)' },
+    { name: 'bw-login', type: 'boolean', group: 'BookWalker auth', help: 'not available: needs a browser. Sign in normally and use --bw-cookie' },
     { name: 'bw-state', type: 'string', arg: 'FILE', group: 'BookWalker auth', help: 'where the saved session lives' },
     { name: 'no-state', type: 'boolean', group: 'BookWalker auth', help: 'do not read or write a saved session' },
     { name: 'bw-sample', type: 'boolean', group: 'BookWalker auth', help: 'force the trial route instead of the free one' },
@@ -196,7 +195,6 @@ export function parseOptions(argv = []) {
         // Repeated flags arrive as an array already; keep it that way so the
         // sampler's own reader handles the shapes (header, cURL, @FILE, path, -).
         bwCookies: Array.isArray(v['bw-cookie']) ? v['bw-cookie'] : (v['bw-cookie'] ? [v['bw-cookie']] : []),
-        bwProfile: String(v['bw-profile'] ?? '~/.manga-dl/profile'),
         bwLogin: Boolean(v['bw-login']),
         bwState: v['bw-state'] ?? null,
         bwNoState: Boolean(v['no-state']),
