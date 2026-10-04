@@ -1,9 +1,9 @@
 {
-  "_comment": "Captured from a real bibGetCntntInfo response for cid 0000249510_jp_0001. \"raw\" holds the encrypted scramble tables exactly as served; \"tables\" holds their decoded (JSON) form, produced by the reference decoder. Decoding requires the matching k, which is the per-request token the viewer generates locally; it is recorded here because it is what the capture used.",
-  "cid": "0000249510_jp_0001",
+  "_comment": "Captured from a real bibGetCntntInfo response for cid 0000249001_jp_0001, with every work-identifying value (cid, ContentID, series name, imprint, author, publisher) replaced by an obvious placeholder of the same shape; the scramble tables themselves are untouched. \"raw\" holds the encrypted scramble tables exactly as served; \"tables\" holds their decoded (JSON) form, produced by the reference decoder. Decoding requires the matching k, which is the per-request token the viewer generates locally; it is recorded here because it is what the capture used.",
+  "cid": "0000249001_jp_0001",
   "k": "vWC1yuevuNt4S1JGyXmuECJ5So7wjmr3",
   "firstPageSrc": "pages/2s5rlNj9.jpg",
-  "requestUrl": "https://www.cmoa.jp/bib/sws/bibGetCntntInfo.php?cid=0000249510_jp_0001&dmytime=1790280604161&k=vWC1yuevuNt4S1JGyXmuECJ5So7wjmr3&u0=1",
+  "requestUrl": "https://www.cmoa.jp/bib/sws/bibGetCntntInfo.php?cid=0000249001_jp_0001&dmytime=1790280604161&k=vWC1yuevuNt4S1JGyXmuECJ5So7wjmr3&u0=1",
   "raw": {
     "stbl": "}qLupSlUkx}LfR!7,dB>VI$-Y(,`q%TIeD5&Tws9-aCYoZUhjSa !Uk[%KF>)aq !n.eD@aU<h>iw*C^oa\".OGc.X{\\ =L7IC8+mJCAt9$!U<i>>U,f}RIC^@knXyP(_Z",
     "ttbl": "}sTx|VlUqy#GfO*68bB=ZK)-Y*3a}+THnJ>)Tuy44aCZw\\bjjUe{'YkY+MQ91^|\"!l2`MEaU@nHmw(G[zc\"0WEn/Xvg\"JK7DM37hQCEx>w*S@iH5Z3p$Y?IYMruM%O2d18;74fpJs //dwNHzS\\mbz*YB`MDEAkFm!czvyt5f^CYoR@JfQVAp,-g150L[}YK_oy*.r#Z?37Bn4-@8kQpxXwRFC'l}*W</{Wz-060mJuQH0[+2;fWTJ=fRlyaJ?H){.tXF4:3bx9-(\\|Yx{i,\"[z+p' '=>l\"eUA$gq)#.aNnP(ahzaRtW8Yu,cPSt18iP{S@@>9w\\&i}]yXN;_w_ydQQuMmI\"8bWsMT@4GB`NC?ihu7 ,3_D",
@@ -165,14 +165,14 @@
     ]
   },
   "item": {
-    "ContentID": "100002495100001",
+    "ContentID": "100002490010001",
     "ContentsServer": "https://free-binb-cmoa.akamaized.net/sbc",
     "ServerType": 0,
     "ViewMode": 2,
     "ContentDate": "99991031163056",
-    "Title": "無料・試し読みページ スーパーの裏でヤニ吸うふたり 1巻（ビッグガンガンコミックス） ｜ 地主 ｜ 漫画（マンガ）・電子書籍のコミックシーモア",
-    "SubTitle": "スーパーの裏でヤニ吸うふたり 1巻",
-    "Publisher": "スクウェア・エニックス",
+    "Title": "無料・試し読みページ サンプル作品 1巻（テストコミックス） ｜ サンプル作者 ｜ 漫画（マンガ）・電子書籍のコミックシーモア",
+    "SubTitle": "サンプル作品 1巻",
+    "Publisher": "サンプル出版社",
     "Author": null,
     "ImageClass": null
   }

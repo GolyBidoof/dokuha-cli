@@ -1,16 +1,8 @@
-/**
- * Help and usage text.
- *
- * Generated from the option declarations in `options.js` so the help cannot drift
- * away from what the parser actually accepts, which is the usual failure mode for
- * hand-maintained usage blocks.
- */
 
 import { OPTIONS, DEFAULTS } from './options.js';
 
-const PROG = 'manga-dl';
+const PROG = 'dokuha';
 
-/** Two-column alignment for the option lines. */
 function optionLines(options) {
     const rows = options.map((opt) => {
         const short = opt.short ? `-${opt.short}, ` : '    ';
@@ -21,7 +13,6 @@ function optionLines(options) {
     return rows.map((r) => `${r.left.padEnd(width)}${r.help}`);
 }
 
-/** Render the full help, grouped the way the options are declared. */
 export function usage() {
     const groups = [];
     for (const opt of OPTIONS) {
@@ -33,25 +24,43 @@ export function usage() {
         }
         group.options.push(opt);
     }
-    // Meta flags are always listed last.
+
     const meta = OPTIONS.filter((o) => o.group === 'Meta');
 
     const blocks = groups.map((g) => `${g.name}\n${optionLines(g.options).join('\n')}`);
 
     return [
-        `${PROG} - download CMOA, ebookjapan and BookWalker volumes, browserless.`,
+        `${PROG} - download CMOA, ebookjapan, BookWalker, Kindle and k-manga volumes, browserless.`,
         '',
         `  ${PROG} URL... [options]`,
         '',
-        'Each positional URL is detected automatically across all three stores. A CMOA',
+        'Each positional URL is detected automatically across all five stores. A CMOA',
         'title page can be given in place of a speedreader URL and is resolved to its',
-        'volumes. Volumes run in parallel by default.',
+        'volumes. A Kindle URL may be a reader URL, a store product page or a bare ASIN.',
+        'A k-manga URL may be a title page, a /vol/<n>/ page or a viewer-launcher link.',
+        'Volumes run in parallel by default.',
         '',
         `  ${PROG} \\`,
-        "    'https://ebookjapan.yahoo.co.jp/books/126344/A000065415/' \\",
-        "    'https://www.cmoa.jp/title/249510/' \\",
-        "    'https://bookwalker.jp/def45047f5-6b90-4d4f-84f7-bd8263daee70/?sample=2' \\",
+        "    'https://ebookjapan.yahoo.co.jp/books/126001/A009000001/' \\",
+        "    'https://www.cmoa.jp/title/249001/' \\",
+        "    'https://bookwalker.jp/de00000001-0000-4000-8000-000000000001/?sample=2' \\",
         `    --out ./library --mokuro`,
+        '',
+        `With --series each URL is instead read as an entry point into a whole series,`,
+        'and only the volumes that are free to read in full are downloaded. A free',
+        'preview is not a free volume, so trial-only volumes are skipped:',
+        '',
+        `  ${PROG} --series \\`,
+        "    'https://www.cmoa.jp/title/214001/' \\",
+        "    'https://ebookjapan.yahoo.co.jp/books/621001/' \\",
+        "    'https://bookwalker.jp/de00000003-0000-4000-8000-000000000003/'",
+        '',
+        '--download-samplers carries on past the free volumes and takes each remaining',
+        "volume's 試し読み sampler, as far as the series goes. Samplers are written to",
+        'their own （試し読み） folder, so a 10-page preview never sits where the whole',
+        'volume belongs. ebookjapan, CMOA, BookWalker and k-manga are supported:',
+        '',
+        `  ${PROG} --series --download-samplers 'https://www.cmoa.jp/title/167001/'`,
         '',
         'Environment',
         '  BWDD_DIR                BookWalker sampler checkout (only for development;',
@@ -63,14 +72,17 @@ export function usage() {
         '',
         `${optionLines(meta).join('\n')}`,
         '',
-        'Free volumes on all three stores need no account or credentials. A signed-in',
-        'BookWalker session is only needed for titles already in your library; pass it',
-        `with --bw-cookie (see README). Defaults: series cap ${DEFAULTS.seriesCap}, format ${DEFAULTS.format}.`,
+        'Free volumes on CMOA, ebookjapan, BookWalker and k-manga need no account or',
+        'credentials. k-manga pages are block-scrambled, so they need the optional sharp',
+        'dependency to be readable (CMOA and Kindle never do).',
+        'A signed-in session is needed for BookWalker titles already in your library',
+        '(--bw-cookie) and for every Kindle volume (--kindle-cookie): an Amazon volume is',
+        'never public, not even a limited-time-free one. See the README.',
+        `Defaults: parallel cap ${DEFAULTS.parallelCap}, format ${DEFAULTS.format}.`,
         '',
     ].join('\n');
 }
 
-/** Version line, read from package.json so there is one source of truth. */
 export function versionLine(pkg) {
-    return `${PROG} ${pkg.version}`;
+    return `読破 ${PROG} ${pkg.version}`;
 }

@@ -129,7 +129,7 @@ async function resolveCodes(spec) {
   throw new Error('could not determine the reading code; pass a /viewer/<type>/<code>/ URL');
 }
 
-export async function collectPages(target, { quiet = false } = {}) {
+export async function collectPages(target, { quiet = false, onNote } = {}) {
   const spec = await resolveCodes(parseTarget(target));
   if (!quiet) process.stderr.write(`type=${spec.type} code=${spec.code} referer=${spec.referer}\n`);
 
@@ -170,7 +170,7 @@ export async function collectPages(target, { quiet = false } = {}) {
   restoreFetch();
 
   // 3. wasm: instantiate, decrypt, read the manifest
-  const glue = await loadGlue();
+  const glue = await loadGlue({ onNote });
   await glue.decrypt_session(open.session_id, drm.code, open.payload, drm.payload);
 
   const dpr = 2;
@@ -197,7 +197,7 @@ export async function collectPages(target, { quiet = false } = {}) {
       height: p.height ?? null,
       position: p.position ?? null,
       jumps: (p.jumps || []).length,
-      // Image base is `/pages` — NOT drm.path (that is the .ddd segment path,
+      // Image base is `/pages` -- NOT drm.path (that is the .ddd segment path,
       // and prod-contents-br-page rejects it with 403). Verified live.
       url: name ? `${CDN}/pages/${name.replace(/\.jpg$/, '.webp')}` : null,
     };

@@ -1,67 +1,89 @@
-/**
- * In-process ebookjapan volume downloader.
- *
- * The vendored engine's CLI entry (`vendor/ebookjapan/download.mjs`) is not
- * usable as a library call: it parses `process.argv` at module scope, keeps the
- * result in private constants (`--out`, `--concurrency`, `--force`, ... all
- * become fixed for the life of the module), and never exports `main()`. Its
- * direct-run guard only fires when `process.argv[1]` is the engine's own path,
- * and re-importing it with a cache-busting query to get a second evaluation
- * would break that guard - which would leave every volume sharing whichever
- * output folder happened to be passed first.
- *
- * What the engine *does* export is its real API: `collectPages` for the signed
- * page list and `fetchWithRetry` for the CDN fetch. This module drives those
- * directly and reimplements the surrounding loop (worker pool, skip-if-complete,
- * expired-URL refresh pass, metadata.json) from the engine's behaviour, so that
- * one volume can carry its own output folder, concurrency and progress sink.
- *
- * Descrambling is deliberately out of reach here. `descramble.mjs` exports
- * nothing, runs its whole CLI at module scope, and calls `process.exit(2)` when
- * `--book-dir` is missing - so importing it would terminate the host process on
- * the first call. `ctx.descramble` / `ctx.pdf` therefore fail loudly instead of
- * silently returning scrambled pages.
- */
 
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { collectPages } from '../../vendor/ebookjapan/page-list.mjs';
 import { fetchWithRetry } from '../../vendor/ebookjapan/download.mjs';
+import { loadGlue } from '../../vendor/ebookjapan/wasm.mjs';
+import { assertSharpAvailable, composePage, recordShuffle, sharpAvailable } from './ebj-descramble.js';
+import { safeFolderName, volumeFolder, writeVolumeMarker } from './volume-folder.js';
+import { timed } from '../phase-timer.js';
+import { adoptLegacyPages, pageFileName, stampPageTimes } from './page-files.js';
+import { createSerialQueue } from '../serial.js';
+import {
+    EBJ_ORIGIN,
+    ebookjapanVolumes,
+    fetchEbookjapanDetail,
+    fetchText,
+    parseEbookjapanFreeVolumes,
+    parseEbookjapanSamplerVolumes,
+    parseEbookjapanSeriesPage,
+    reject,
+} from '../series.js';
 
-/** How many times the page list is re-resolved to revive expired signed URLs. */
 const REFRESH_PASSES = 2;
-/** Attempts after the first, per page. Matches the engine's own default. */
+
 const DEFAULT_RETRIES = 4;
-/** Matches DEFAULTS.ebConcurrency in src/options.js. */
+
 const DEFAULT_CONCURRENCY = 32;
-/** The engine clamps its own pool the same way. */
+
 const MAX_CONCURRENCY = 256;
 
-/** One path component, with the engine's own sanitiser so folder names match. */
-function safeName(s) {
-    return (s || 'ebookjapan-volume')
-        .normalize('NFC')
-        .replace(/[/\\:*?"<>|\u0000-\u001f]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 120) || 'ebookjapan-volume';
+const EBJ_MAX_SEEDS = 8;
+
+const collectExclusive = createSerialQueue();
+
+function collectPagesSerial(target, { descramble = false, onUnknown, onNote, timer = null } = {}) {
+    return collectExclusive(async () => {
+        // The licence and the page list are the handshake; loading the descrambler's
+        // WASM module and building the per-page shuffle table is preparation. The
+        // second is not a store round trip at all, and on a cold cache the first is a
+        // multi-megabyte download that used to be hidden inside `handshake`.
+        const book = await timed(timer, 'handshake', () => collectPages(target, { quiet: true, onNote }));
+        if (!descramble || !book?.totalPages) return { book, tiles: null };
+
+        const tiles = [];
+        const unknown = new Set();
+        await timed(timer, 'prework', async () => {
+            const glue = await loadGlue({ onNote });
+            for (let i = 0; i < book.totalPages; i++) {
+                const page = book.pages[i] || {};
+                const recorded = recordShuffle(glue, i, { width: page.width || 0, height: page.height || 0 });
+                for (const name of recorded.unknown) unknown.add(name);
+                tiles.push(recorded.ops);
+            }
+            if (unknown.size && onUnknown) onUnknown([...unknown]);
+        });
+        return { book, tiles };
+    });
 }
 
-/**
- * True when `file` is a complete WebP: RIFF/WEBP header plus a RIFF length field
- * that agrees with the real file size. Catches truncated and placeholder files
- * that a bare size check would accept.
- */
-async function isCompleteWebp(file, size) {
+const MANIFEST_FILE = 'manifest.json';
+
+async function readEbookjapanManifest(folder) {
+    const read = (name) => fsp.readFile(path.join(folder, name), 'utf8')
+        .then((text) => JSON.parse(text), () => null);
+    return await read(MANIFEST_FILE) || await read('metadata.json');
+}
+
+// The store's title arrives in whatever normalisation form it likes, and a
+// title of "." or ".." would otherwise walk the folder out of --out, so this
+// goes through the shared sanitiser rather than a second, looser rule-set.
+const safeName = (value) => safeFolderName(String(value ?? '').normalize('NFC'), 'ebookjapan-volume');
+
+async function isCompleteImage(file, size, extension) {
     let fh;
     try {
         fh = await fsp.open(file, 'r');
         const head = Buffer.alloc(12);
         const { bytesRead } = await fh.read(head, 0, 12, 0);
         if (bytesRead < 12) return false;
-        if (head.toString('latin1', 0, 4) !== 'RIFF') return false;
-        if (head.toString('latin1', 8, 12) !== 'WEBP') return false;
-        // The RIFF length counts everything after the first 8 bytes.
+        if (extension === 'webp') {
+            if (head.toString('latin1', 0, 4) !== 'RIFF') return false;
+            if (head.toString('latin1', 8, 12) !== 'WEBP') return false;
+        } else if (head[0] !== 0xff || head[1] !== 0xd8 || head[2] !== 0xff) {
+            return false;
+        }
+
         return head.readUInt32LE(4) + 8 === size;
     } catch {
         return false;
@@ -70,53 +92,27 @@ async function isCompleteWebp(file, size) {
     }
 }
 
-/**
- * Send one progress event, ignoring a sink that throws.
- *
- * `ctx.progress` comes from the caller, so it is untrusted here: the display
- * must never be able to fail a download.
- */
 function tell(progress, method, ...args) {
     if (typeof progress?.[method] !== 'function') return;
     try {
         progress[method](...args);
     } catch {
-        // Deliberately ignored; see above.
+
     }
 }
 
-/**
- * Download one ebookjapan volume, in this process, without spawning anything.
- *
- * @param {{target: string, key?: string, title?: string}} task
- *   `target` is a books/viewer URL or a bare reading code; `key` is the progress
- *   key (defaults to `target`); `title` seeds the progress label.
- * @param {object} ctx
- *   @param {string} ctx.out parent folder; the volume is written to
- *     `<out>/<title>/`, or straight into `<out>` when `flat` is set.
- *   @param {number} [ctx.concurrency] pages in flight (default 32, capped 256).
- *   @param {number} [ctx.retries] attempts after the first, per page (default 4).
- *   @param {boolean} [ctx.force] re-download pages that are already complete.
- *   @param {boolean} [ctx.flat] write pages straight into `out`, no volume folder.
- *   @param {boolean} [ctx.descramble] unsupported in-process; requesting it throws.
- *   @param {string} [ctx.table] only meaningful to the descrambler, so unused here.
- *   @param {string} [ctx.pdf] unsupported in-process; requesting it throws.
- *   @param {{update: (key: string, patch: object) => void, note: (text: string) => void}} [ctx.progress]
- *     optional sink. `update` receives `{label, total, done, failed, bytes, phase}`
- *     with `phase` one of `downloading` / `uploading` / `ocr` / `finalizing`;
- *     `note` receives an occasional free-form line. Neither is ever required, and
- *     an exception from either is swallowed.
- * @returns {Promise<{store: string, id: string, title: string, folder: string,
- *   totalPages: number, downloaded: number, skipped: number, failed: number,
- *   bytes: number, failures: Array<{file: string, error: string}>}>}
- *   `id` is the volume's publication code (falling back to its reading code);
- *   `downloaded` counts pages written by this call and `skipped` those reused
- *   from disk. Individual page failures are reported in `failures` rather than
- *   thrown, so a partial volume still returns a usable record.
- * @throws {Error} on an unresolvable target, a missing `ctx.out`, an unwritable
- *   folder, a request for `ctx.descramble` / `ctx.pdf`, a volume the API reports
- *   as having no pages, or a volume where not a single page could be downloaded.
- */
+function warn(progress, message) {
+    if (typeof progress?.note === 'function') {
+        tell(progress, 'note', message);
+        return;
+    }
+    process.stderr.write(`${message}\n`);
+}
+
+function boxOf(row) {
+    return { width: Number(row?.width) || 0, height: Number(row?.height) || 0 };
+}
+
 export async function downloadEbookjapan(task, ctx = {}) {
     const target = typeof task === 'string' ? task : task?.target;
     if (!target) throw new Error('ebookjapan: no target given');
@@ -125,23 +121,25 @@ export async function downloadEbookjapan(task, ctx = {}) {
     const out = ctx.out;
     if (!out) throw new Error('ebookjapan: ctx.out is required');
 
-    // Silently returning scrambled pages, or no PDF at all, would be worse than
-    // refusing: the caller asked for a post-process this build cannot perform.
-    if (ctx.descramble) {
-        throw new Error('ebookjapan: descramble is not available in-process; ' +
-            'vendor/ebookjapan/descramble.mjs runs at module scope and cannot be imported');
-    }
-    if (ctx.pdf) {
-        throw new Error('ebookjapan: pdf output needs the descramble CLI, ' +
-            'which cannot be loaded in-process');
+    let descramble;
+    if (ctx.descramble === false) {
+        descramble = false;
+    } else if (ctx.descramble === true) {
+        assertSharpAvailable();
+        descramble = true;
+    } else if (sharpAvailable()) {
+        descramble = true;
+    } else {
+        descramble = false;
+        warn(ctx.progress,
+            'ebookjapan: pages are tile-scrambled and the optional "sharp" dependency is not installed,\n'
+            + '  so the scrambled mosaic will be written as downloaded.\n'
+            + '  Install it with:  npm install sharp');
     }
 
-    // `ebConcurrency` is the store's own key from the CLI; `concurrency` is this
-    // function's documented standalone parameter. The store's key wins, because
-    // reading only `concurrency` is what made --eb-concurrency a no-op.
     const concurrency = Math.max(1, Math.min(MAX_CONCURRENCY,
         Number(ctx.ebConcurrency ?? ctx.concurrency) || DEFAULT_CONCURRENCY));
-    // `null` and `undefined` both mean "use the engine's own default".
+
     const wanted = ctx.retries === undefined || ctx.retries === null ? DEFAULT_RETRIES : Number(ctx.retries);
     const retries = Number.isFinite(wanted) ? Math.max(0, wanted) : DEFAULT_RETRIES;
     const force = Boolean(ctx.force);
@@ -156,18 +154,46 @@ export async function downloadEbookjapan(task, ctx = {}) {
         bytes: 0,
     });
 
-    // Quiet: this is a library call and the caller owns stdout/stderr.
-    const book = await collectPages(target, { quiet: true });
+    // Not wrapped in `handshake` from here: `collectPagesSerial` times its own
+    // handshake (licence + page list) and prework (WASM module + shuffle table)
+    // separately, and an outer wrapper would swallow both into one number.
+    const { book, tiles } = await collectPagesSerial(target, {
+        descramble,
+        timer: ctx.timer,
+        onNote: (line) => warn(progress, line),
+        onUnknown: (names) => warn(progress,
+            `ebookjapan: page composition does not implement ${names.join(', ')}; `
+            + 'the rebuilt pages may be wrong'),
+    });
     if (!book?.totalPages) throw new Error(`ebookjapan: no pages found for ${target}`);
 
-    const folder = ctx.flat ? out : path.join(out, safeName(book.name));
+    const id = book.publication || book.code || book.fileId || String(target);
+    const folder = await volumeFolder(ctx, {
+        title: book.name,
+        id,
+        sample: task.sample === true,
+        sanitize: safeName,
+    });
     await fsp.mkdir(folder, { recursive: true });
 
-    const pad = String(book.totalPages).length;
+    // A scrambled page is written as the store sent it, which is WebP. A rebuilt
+    // one is ours to choose, and it is JPEG unless WebP is asked for: the source is
+    // lossy, so there is nothing for a lossless codec to preserve, and every other
+    // store's pages are JPEG.
+    const format = ctx.format === 'webp' ? 'webp' : 'jpeg';
+    const extension = descramble ? (format === 'jpeg' ? 'jpg' : 'webp') : 'webp';
+
+    await adoptLegacyPages(folder, { count: book.totalPages, extension });
+
     const rows = book.pages.map((page, i) => ({
         ...page,
-        file: `page_${String(i).padStart(pad, '0')}.webp`,
+        file: pageFileName(i + 1, extension),
     }));
+
+    const previous = force
+        ? null
+        : await readEbookjapanManifest(folder);
+    const reuseExisting = !force && Boolean(previous?.descrambled) === descramble;
 
     tell(progress, 'update', key, { label: book.name || key, total: rows.length });
 
@@ -188,12 +214,10 @@ export async function downloadEbookjapan(task, ctx = {}) {
             const row = rows[i];
             const dest = path.join(folder, row.file);
 
-            if (!force) {
-                // A cached page is reused only when it is a structurally valid
-                // WebP whose declared length matches the bytes on disk, so a
-                // truncated download is re-fetched rather than silently kept.
+            if (reuseExisting) {
+
                 const st = await fsp.stat(dest).catch(() => null);
-                if (st && st.size > 0 && await isCompleteWebp(dest, st.size)) {
+                if (st && st.size > 0 && await isCompleteImage(dest, st.size, extension)) {
                     row.bytes = st.size;
                     bytes += st.size;
                     skipped++;
@@ -208,10 +232,17 @@ export async function downloadEbookjapan(task, ctx = {}) {
                 failed++;
             } else {
                 try {
-                    const buf = await fetchWithRetry(row.url, retries);
-                    await fsp.writeFile(dest, buf);
-                    row.bytes = buf.length;
-                    bytes += buf.length;
+                    const buf = await timed(ctx.timer, 'fetch', () => fetchWithRetry(row.url, retries));
+
+                    const composed = descramble
+                        ? await timed(ctx.timer, 'rebuild',
+                            () => composePage(buf, tiles[i], boxOf(rows[i]), { format }))
+                        : null;
+                    if (descramble && !composed) throw new Error('page composition produced no plan');
+                    const data = composed ? composed.data : buf;
+                    await timed(ctx.timer, 'write', () => fsp.writeFile(dest, data));
+                    row.bytes = data.length;
+                    bytes += data.length;
                     downloaded++;
                 } catch (error) {
                     row.error = error.message;
@@ -225,17 +256,18 @@ export async function downloadEbookjapan(task, ctx = {}) {
 
     await Promise.all(Array.from({ length: Math.min(concurrency, rows.length) }, worker));
 
-    // The page URLs are signed and expire; a long parallel run outlives them.
-    // Re-resolving and retrying is what keeps a fast run from losing its tail.
     for (let pass = 1; pass <= REFRESH_PASSES && failed > 0; pass++) {
         const retryable = rows.filter((row) => row.error);
         if (!retryable.length) break;
 
         let fresh;
         try {
-            fresh = await collectPages(target, { quiet: true });
+
+            // A refresh pass re-reads the page list, so it is handshake time again;
+            // `descramble: false` means no prework -- no module load, no shuffle table.
+            fresh = (await collectPagesSerial(target, { descramble: false, timer: ctx.timer })).book;
         } catch {
-            // Keep the failures already recorded: the pages on disk are intact.
+
             break;
         }
 
@@ -260,17 +292,22 @@ export async function downloadEbookjapan(task, ctx = {}) {
                 if (i < 0) return;
                 const row = retryable[i];
                 try {
-                    const buf = await fetchWithRetry(row.url, retries);
-                    await fsp.writeFile(path.join(folder, row.file), buf);
-                    row.bytes = buf.length;
-                    bytes += buf.length;
+                    const buf = await timed(ctx.timer, 'fetch', () => fetchWithRetry(row.url, retries));
+                    const composed = descramble
+                        ? await timed(ctx.timer, 'rebuild',
+                            () => composePage(buf, tiles[row.page], boxOf(row), { format }))
+                        : null;
+                    if (descramble && !composed) throw new Error('page composition produced no plan');
+                    const data = composed ? composed.data : buf;
+                    await timed(ctx.timer, 'write', () => fsp.writeFile(path.join(folder, row.file), data));
+                    row.bytes = data.length;
+                    bytes += data.length;
                     downloaded++;
                     failed--;
                 } catch (error) {
                     row.error = error.message;
                 }
-                // `settled` does not move: every retryable page was already
-                // counted as settled by the pass that failed it.
+
                 tell(progress, 'update', key, { done: settled, failed, bytes, phase: 'downloading' });
             }
         };
@@ -279,10 +316,13 @@ export async function downloadEbookjapan(task, ctx = {}) {
 
     const elapsedSeconds = +((performance.now() - startedAt) / 1000).toFixed(2);
 
-    tell(progress, 'update', key, { phase: 'finalizing', done: rows.length, failed, bytes });
+    tell(progress, 'update', key, {
+        ...(ctx.bridge ? {} : { phase: 'finalizing' }),
+        done: rows.length,
+        failed,
+        bytes,
+    });
 
-    // Same field names as the engine's manifest, so anything that already reads
-    // a vendored metadata.json keeps working.
     const manifest = {
         source: target,
         title: book.name,
@@ -295,18 +335,26 @@ export async function downloadEbookjapan(task, ctx = {}) {
         chapters: book.chapters,
         totalPages: book.totalPages,
         concurrency,
+
+        descrambled: descramble,
         elapsedSeconds,
         bytes,
         pages: rows,
     };
-    await fsp.writeFile(path.join(folder, 'metadata.json'), JSON.stringify(manifest, null, 2));
 
-    // The manifest is written before this throw on purpose: it names every page
-    // that failed, which is the only on-disk record of what the CDN refused.
+    await fsp.writeFile(path.join(folder, MANIFEST_FILE), JSON.stringify(manifest, null, 2));
+    await writeVolumeMarker(folder, {
+        store: 'ebookjapan',
+        id,
+        title: book.name || task?.title || String(target),
+    });
+
     if (!downloaded && !skipped) {
         throw new Error(`ebookjapan: every one of the ${rows.length} pages of ` +
             `"${book.name}" failed to download`);
     }
+
+    if (downloaded) await stampPageTimes(folder, rows.map((row) => row.file));
 
     return {
         store: 'ebookjapan',
@@ -321,3 +369,78 @@ export async function downloadEbookjapan(task, ctx = {}) {
         failures: rows.filter((row) => row.error).map((row) => ({ file: row.file, error: row.error })),
     };
 }
+
+export async function resolveEbookjapanSeries(det, input, ctx = {}) {
+    const titleId = det.titleId || (/\/books\/(\d+)/.exec(det.url || input) || [])[1] || null;
+    if (!titleId) {
+        return reject(input, 'an ebookjapan series needs a /books/<title>/ URL; a bare code does not name its series');
+    }
+
+    let seeds = det.publication ? [det.publication] : [];
+    if (!seeds.length) {
+        seeds = parseEbookjapanSeriesPage(await fetchText(`${EBJ_ORIGIN}/books/${titleId}/`, ctx))
+            .slice(0, EBJ_MAX_SEEDS);
+        if (!seeds.length) {
+            return reject(input, `ebookjapan title ${titleId}: its page listed no publications to resolve from`);
+        }
+    }
+
+    for (const seed of seeds) {
+        const body = await fetchEbookjapanDetail(titleId, seed, ctx);
+        if (!body || String(body.detail.title?.id) !== String(titleId)) continue;
+
+        const free = parseEbookjapanFreeVolumes(body);
+        const samplers = ctx.samplers ? parseEbookjapanSamplerVolumes(body) : [];
+        const total = ebookjapanVolumes(body).length;
+        if (!free.length && !samplers.length) {
+            const tail = ctx.samplers ? ', and it offers no 試し読み samplers either' : ' right now';
+            return reject(input, `ebookjapan title ${titleId} has ${total} editions and none of them are free${tail}`);
+        }
+
+        const make = (entry, sample) => ({
+            input,
+            kind: 'ebookjapan',
+            target: sample ? `${EBJ_ORIGIN}/viewer/trial/${entry.code}/` : entry.code,
+            url: `${EBJ_ORIGIN}/books/${titleId}/${entry.publication}/`,
+            title: entry.name,
+            order: entry.order,
+            fromSeries: true,
+            ...(sample ? { sample: true } : {}),
+        });
+        const tasks = free.map((entry) => make(entry, false)).concat(samplers.map((entry) => make(entry, true)));
+        const note = `ebookjapan title ${titleId}: ${free.length} of ${total} volumes are free`
+            + (samplers.length ? `, plus ${samplers.length} 試し読み samplers` : '');
+        return { tasks, rejected: [], notes: [note] };
+    }
+
+    return reject(input, `ebookjapan title ${titleId}: no edition of it could be resolved`);
+}
+
+export const platform = {
+    name: 'ebookjapan',
+    id: 'ebookjapan',
+    label: 'EBJ',
+    lane: 'net',
+    patterns: [
+        { re: /ebookjapan\.yahoo\.co\.jp\/books\/(\d+)\/([A-Za-z0-9]+)/i, kind: 'ebookjapan',
+            build: (m, raw) => ({ kind: 'ebookjapan', titleId: m[1], publication: m[2], url: raw }) },
+        { re: /ebookjapan\.yahoo\.co\.jp\/books\/(\d+)\/?(?:[?#]|$)/i, kind: 'ebookjapan-title',
+            build: (m, raw) => ({ kind: 'ebookjapan-title', titleId: m[1], url: raw }) },
+        { re: /ebookjapan\.yahoo\.co\.jp/i, kind: 'ebookjapan',
+            build: (m, raw) => ({ kind: 'ebookjapan', url: raw }) },
+        { re: /^(B\d{6,})$/, kind: 'ebookjapan',
+            build: (m, raw) => ({ kind: 'ebookjapan', code: m[1], url: raw }) },
+        { re: /^(A\d{6,})$/, kind: 'unknown',
+            build: (m, raw) => ({
+                kind: 'unknown',
+                url: raw,
+                reason: `${raw} is an ebookjapan publication code, and a publication does not name `
+                    + 'its own title, so its reading code cannot be resolved from it alone; '
+                    + `paste the https://ebookjapan.yahoo.co.jp/books/<title>/${raw}/ URL instead`,
+            }) },
+    ],
+    volumeId: (det) => det.code ?? null,
+    expand: () => false,
+    series: resolveEbookjapanSeries,
+    download: downloadEbookjapan,
+};

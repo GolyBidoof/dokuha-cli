@@ -1,0 +1,46 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22', '24']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # sharp is what the vendored engines render with, and the tests that decode
+      # a page skip without it, so the suite would pass on a machine that cannot
+      # actually read a page. Installing it is the point.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test the CLI
+        run: npm test
+
+      - name: Test the vendored engines
+        run: npm run engines:test
+
+      - name: The CLI starts and reports its version
+        run: node bin/dokuha.mjs --version
+
+      - name: The CLI starts and prints its help
+        run: node bin/dokuha.mjs --help
+
+      - name: A bad flag exits non-zero
+        run: |
+          if node bin/dokuha.mjs --definitely-not-a-flag > /dev/null 2>&1; then
+            echo "an unknown flag was accepted"
+            exit 1
+          fi

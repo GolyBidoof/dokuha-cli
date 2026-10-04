@@ -7,8 +7,8 @@
  */
 
 import path from 'node:path';
-import { openVolume, downloadVolume, volumeName, parseTarget } from './downloader.js';
-import { normaliseFormat, FORMATS } from './codec.js';
+import { openVolume, downloadVolume, volumeName } from './downloader.js';
+import { FORMATS } from './codec.js';
 import { DEFAULT_JPEG_QUALITY } from './jpeg_encode.js';
 import { defaultJobCount } from './render_pool.js';
 import { installSocketPool, socketPoolInfo } from './http.js';
@@ -20,8 +20,8 @@ Usage:
 
 Arguments:
   url|cid                 a speed-reader URL such as
-                          https://www.cmoa.jp/bib/speedreader/?cid=0000249510_jp_0001&u0=1
-                          or just the cid, e.g. 0000249510_jp_0001
+                          https://www.cmoa.jp/bib/speedreader/?cid=0000249001_jp_0001&u0=1
+                          or just the cid, e.g. 0000249001_jp_0001
 
 Options:
   -o, --out DIR           output directory (default: ./<cid>)

@@ -12,13 +12,13 @@ do the same job from inside a browser page.
 ## Quick start
 
 ```sh
-node bin/cmoa-headless.mjs 'https://www.cmoa.jp/bib/speedreader/?cid=0000249510_jp_0001&u0=1&rurl=...'
+node bin/cmoa-headless.mjs 'https://www.cmoa.jp/bib/speedreader/?cid=0000249001_jp_0001&u0=1&rurl=...'
 ```
 
 A bare `cid` works too, and so does a `title/<id>` URL:
 
 ```sh
-node bin/cmoa-headless.mjs 0000249510_jp_0001 -o ./out
+node bin/cmoa-headless.mjs 0000249001_jp_0001 -o ./out
 ```
 
 Output is `0001.jpg`, `0002.jpg`, … plus a `metadata.json` describing the volume and
@@ -31,10 +31,10 @@ There is a combined driver one level up that takes all three stores in one comma
 
 ```sh
 node ../books.mjs \
-  'https://ebookjapan.yahoo.co.jp/books/126344/A000065415/' \
-  'https://www.cmoa.jp/title/249510/' \
-  'https://www.cmoa.jp/title/249510/vol/2/' \
-  'https://bookwalker.jp/def45047f5-6b90-4d4f-84f7-bd8263daee70/?sample=2' \
+  'https://ebookjapan.yahoo.co.jp/books/126001/A009000001/' \
+  'https://www.cmoa.jp/title/249001/' \
+  'https://www.cmoa.jp/title/249001/vol/2/' \
+  'https://bookwalker.jp/de00000001-0000-4000-8000-000000000001/?sample=2' \
   --out ./library --series 4 --mokuro
 ```
 

@@ -18,7 +18,7 @@ const isPublicCaptureUrl = () => false;
 // VENDORED DEVIATION (second): `runPublicTrialJob` accepts an optional
 // `options.normalizePage`, defaulting to the inline `normalizePage` below. The
 // inline version un-permutes a decoded page in plain JavaScript on whichever
-// thread called it, which is the main event loop; the manga-dl adapter passes a
+// thread called it, which is the main event loop; the dokuha adapter passes a
 // worker-pool implementation instead so a 128-page fetch loop is not serialised
 // behind per-page decode/copy/encode. With no override the behaviour here is
 // byte-identical to before.
@@ -371,7 +371,17 @@ async function normalizePage(data, job, manifest) {
 async function pushBridgePage(bridge, sessionId, page, title, options) {
     if (!bridge || !sessionId) return;
     const name = `page_${String(page.index).padStart(4, '0')}.jpg`;
-    const response = await bridge.pushPageBuffer(sessionId, page.data, name, page.index, {
+    // A page reused from disk carries no body -- it was never held in memory, only
+    // measured -- but the bridge still has to be handed the bytes in order to OCR
+    // it. Sending the null body straight through made every upload of a resumed
+    // run fail with "Uploaded page is not a recognized image", which is a 400 that
+    // names neither the page nor the cause. Read it back instead.
+    let data = page.data;
+    if (!data && page.diskPath) data = await fs.promises.readFile(page.diskPath);
+    if (!data || !data.length) {
+        throw new AutomationError(`page ${name} has no image data to upload`);
+    }
+    const response = await bridge.pushPageBuffer(sessionId, data, name, page.index, {
         signal: options.signal,
         timeoutMs: 60000
     });
@@ -489,10 +499,24 @@ async function runPublicTrialJob(options = {}) {
     if (options.onProgress) options.onProgress({ type: 'book-total', total, title });
     const outputDir = options.outputDir || path.resolve('.');
     fs.mkdirSync(outputDir, { recursive: true });
+    // VENDORED DEVIATION (third): `pagesAsFiles` writes each page as its own
+    // file instead of collecting them into one archive. The CLI asks for this by
+    // default, because a directory of pages can be inspected, resumed and handed
+    // to something other than the tool that made it, whereas a zip can only be
+    // opened whole. It also makes the per-page resume below possible at all: the
+    // archive path has no way to tell which pages already arrived.
+    const writePages = options.pagesAsFiles === true;
+    const pageFileName = (index) => `page-${String(index).padStart(4, '0')}.jpg`;
+    let reused = 0;
     const pages = [];
     let next = 0;
     let completed = 0;
     let failed = [];
+    // Bytes as they land, so the progress row can show a running size the way
+    // ebookjapan's does. Each entry is the length of what is about to be written
+    // (the normalized page, or the file already on disk when a page is reused),
+    // which is what makes the running figure agree with the final on-disk size.
+    let bytes = 0;
     // A manifest can list more pages than an edition actually licenses (a free
     // preview is a prefix of the full book). Those answer 403 and are not
     // failures, so they are counted separately.
@@ -502,14 +526,47 @@ async function runPublicTrialJob(options = {}) {
             const index = next++;
             if (index >= manifest.jobs.length) return;
             const job = manifest.jobs[index];
+            // Reuse an already-written page rather than fetching it again, so a
+            // re-run of a failed batch only pays for what is missing. The page is
+            // left with a null body because it never needs to be held in memory.
+            if (writePages && !options.force) {
+                try {
+                    const onDiskPath = path.join(outputDir, pageFileName(job.index));
+                    const onDisk = fs.statSync(onDiskPath).size;
+                    if (onDisk > 0) {
+                        pages.push({ index: job.index, data: null, reused: true, diskPath: onDiskPath });
+                        completed += 1;
+                        reused += 1;
+                        // A reused page still counts towards the volume's size,
+                        // so a resumed run reports the whole volume rather than
+                        // only the pages it happened to fetch this time.
+                        bytes += onDisk;
+                        if (options.onProgress) options.onProgress({
+                            type: 'download-progress',
+                            pageCount: completed,
+                            total,
+                            failed: failed.length,
+                            bytes
+                        });
+                        continue;
+                    }
+                } catch {
+                    // Not on disk yet, which is the normal first-run case.
+                }
+            }
             try {
                 const pageUrl = `${session.baseUrl}${job.rel}?${authQuery(session.auth)}`;
                 let normalized = null;
                 let lastPageError = null;
                 for (let attempt = 0; attempt < 3 && !normalized; attempt++) {
                     try {
+                        const fetchStarted = Date.now();
                         const response = await fetchPublicPage(pageUrl, proxyPorts, Object.assign({}, options, { pageIndex: job.index + attempt, fetchScheduler }));
                         const data = Buffer.from(await response.arrayBuffer());
+                        // The transport half of a page, reported separately from the
+                        // seam-carving that follows it. `normalizePage` is the caller's
+                        // and times itself; this is the part the engine owns.
+                        if (options.onPhase) options.onPhase('fetch', Date.now() - fetchStarted);
                         if (!data.length || data[0] !== 0xff || data[1] !== 0xd8) throw new Error('response was not a JPEG');
                         normalized = await (options.normalizePage || normalizePage)(data, job, manifest);
                     } catch (error) {
@@ -520,11 +577,13 @@ async function runPublicTrialJob(options = {}) {
                 if (!normalized) throw lastPageError || new Error('page download failed');
                 pages.push({ index: job.index, data: normalized });
                 completed += 1;
+                bytes += normalized.length;
                 if (options.onProgress) options.onProgress({
                     type: 'download-progress',
                     pageCount: completed,
                     total,
-                    failed: failed.length
+                    failed: failed.length,
+                    bytes
                 });
             } catch (error) {
                 const detail = { index: job.index, message: error.message };
@@ -584,6 +643,37 @@ async function runPublicTrialJob(options = {}) {
             publicRoute: options.publicRoute || null,
             total: manifest.total,
             pageCount: pages.length,
+            failures: failed,
+            unlicensed: unlicensed.length
+        };
+    }
+
+    if (writePages) {
+        // Pages that were reused were never held in memory, so they are skipped
+        // rather than written as empty files.
+        let written = 0;
+        const writeStarted = Date.now();
+        for (const page of pages) {
+            if (!page.data) continue;
+            fs.writeFileSync(path.join(outputDir, pageFileName(page.index)), page.data);
+            written++;
+        }
+        if (options.onPhase) options.onPhase('write', Date.now() - writeStarted);
+        if (options.onProgress) {
+            options.onProgress({ type: 'pages-complete', total: pages.length, written, reused, outputDir });
+        }
+        return {
+            ok: true,
+            publicCapture: true,
+            mode: 'pages',
+            status: 'completed',
+            safeTitle: title,
+            publicRoute: options.publicRoute || null,
+            outputPath: outputDir,
+            total: manifest.total,
+            pageCount: pages.length,
+            written,
+            reused,
             failures: failed,
             unlicensed: unlicensed.length
         };

@@ -271,7 +271,6 @@ export function encodeJpeg(rgb, width, height, options = {}) {
   const mcusX = Math.ceil(width / mcuW);
   const mcusY = Math.ceil(height / mcuH);
 
-  // Planes at component resolution; the JS encoder reads them directly.
   const yStride = mcusX * hY * 8;
   const yHeight = mcusY * vY * 8;
   const cStride = mcusX * 8;

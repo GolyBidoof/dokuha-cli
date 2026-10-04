@@ -1,0 +1,75 @@
+# Live acceptance: do the stores and the vendored engines still work, and does
+# this CLI agree with the userscript about the pages?
+#
+# Deliberately NOT part of CI. tests/run.mjs is hermetic; this talks to real
+# storefronts and runs only when a human asks for it.
+#
+# The harness lives in the userscript repo, which is checked out alongside. It
+# discovers a volume that is free right now, downloads it with the userscript in
+# headless Chrome and with this CLI, and compares the two page sets in pixels.
+# That comparison is what makes "the pages are descrambled" checkable without a
+# golden image — a page left shuffled cannot match a correct one.
+#
+# No secrets: every target is free to read anonymously. Kindle is excluded on
+# purpose (it needs a signed-in Amazon session).
+name: Acceptance (live stores)
+
+on:
+  workflow_dispatch:
+    inputs:
+      stores:
+        description: Comma-separated stores to check
+        required: false
+        default: bookwalker,cmoa,ebookjapan
+        type: string
+      min_pages:
+        description: Fewest pages that counts as a working download
+        required: false
+        default: '5'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out this CLI
+        uses: actions/checkout@v4
+
+      # Public repository, so the default token is enough.
+      - name: Check out the userscript (the harness and the second implementation)
+        uses: actions/checkout@v4
+        with:
+          repository: GolyBidoof/bookwalker-ebookjapan-cmoa-native-downloader
+          path: us
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install the CLI
+        run: npm install --no-audit --no-fund
+
+      - name: Install the harness (puppeteer + sharp)
+        run: npm install --no-audit --no-fund
+        working-directory: us
+
+      - name: Ensure a Chrome for the browser run
+        run: npm run browser
+        working-directory: us
+
+      - name: Acceptance run
+        env:
+          BWDD_ACCEPTANCE_US: ${{ github.workspace }}/us
+        run: npm run test:acceptance -- --min-pages "${{ inputs.min_pages }}" --stores "${{ inputs.stores }}"
+
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-report
+          path: us/tests/acceptance_result.json
+          if-no-files-found: warn

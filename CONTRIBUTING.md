@@ -3,8 +3,8 @@
 ## Getting set up
 
 ```sh
-git clone <this repo> manga-dl
-cd manga-dl
+git clone <this repo> dokuha
+cd dokuha
 npm install
 npm test
 ```
@@ -14,7 +14,7 @@ without a network, that is a bug.
 
 ## The one rule that matters
 
-**Do not edit anything under `vendor/` to fix a bug in `manga-dl`.**
+**Do not edit anything under `vendor/` to fix a bug in `dokuha`.**
 
 Those are copies of three existing engines, and edits to them are lost the next time
 someone refreshes a copy. If a vendored engine needs different behaviour, change the
@@ -33,8 +33,25 @@ decision, not an accident of implementation. Concretely:
 - No code path that launches a browser process.
 - If a store needs a signed-in session, it is supplied as cookies by the user.
 
-`grep -ri puppeteer vendor/ src/` should return nothing. If you find yourself wanting
-a browser for something, raise it in an issue rather than adding one.
+Both of these should return nothing:
+
+```sh
+# No browser driver anywhere in the dependency tree.
+grep -rniE 'puppeteer|playwright|chrome-remote' package.json
+
+# And nothing requires one at runtime.
+grep -rnE "(require\(|from |import\()['\"]?(puppeteer|playwright|chrome-remote)" src/ vendor/
+```
+
+A plain `grep -ri puppeteer vendor/ src/` is **not** a valid check here and fails even
+on a clean tree: the word appears in prose recording the removal, in `vendor/README.md`
+and in the stub comment above `vendor/bookwalker/public-trial.js`. Note the distinction
+the second command makes -- it matches an import, not a mention, so it is unaffected
+by either. `vendor/README.md` still repeats the plain-grep claim; it is wrong in the
+same way, so use the two commands above instead of it.
+
+If you find yourself wanting a browser for something, raise it in an issue rather than
+adding one.
 
 ## Style
 
@@ -43,7 +60,9 @@ There is no linter, so match the surrounding code:
 - 4-space indentation, single quotes, semicolons, `const` by default.
 - ESM in `src/` and `tests/`. Relative imports include the file extension.
 - Comments explain **why**, not what. Do not restate the code.
-- Use plain ASCII hyphens, never em-dashes, in comments, strings and documents.
+- Use plain ASCII hyphens, never em-dashes, in comments and documents. Em-dashes in
+  strings are a different matter: a few are deliberate user-facing punctuation or
+  wire-format characters, so check what a string is before you "normalise" it.
 - Every exported function gets a JSDoc block describing its contract.
 
 Comments in this codebase tend to record the reason a thing is the way it is,
@@ -56,9 +75,9 @@ Add a test for anything that could silently regress. Two rules:
 
 1. **Default tests must be hermetic.** No network, no bridge, no real credentials.
    If a test needs a live store, put it in `tests/test_network.mjs`, which is skipped
-   unless `MANGA_DL_TEST_NETWORK=1` is set.
+   unless `DOKUHA_TEST_NETWORK=1` is set.
 2. **Never write to a real session or output directory.** Use
-   `fs.mkdtempSync(path.join(os.tmpdir(), 'manga-dl-'))` and clean it up, and pass
+   `fs.mkdtempSync(path.join(os.tmpdir(), 'dokuha-'))` and clean it up, and pass
    `bwNoState: true` in any test context.
 
 The most valuable tests here are the ones that encode a bug that actually happened: a

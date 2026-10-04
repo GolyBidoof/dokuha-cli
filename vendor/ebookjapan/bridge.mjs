@@ -12,7 +12,6 @@
  *
  * No browser, no cookies: plain HTTP against 127.0.0.1.
  */
-import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 
@@ -56,7 +55,7 @@ const DEFAULT_CANDIDATES = [
   'http://127.0.0.1:63443',
 ];
 
-export function bridgeCandidates(explicit) {
+function bridgeCandidates(explicit) {
   const list = [
     explicit,
     process.env.BWDD_BRIDGE_URL,
@@ -195,7 +194,7 @@ export class BridgeClient {
   /**
    * Start (or resume) a volume session.
    *
-   * `reuseExisting` resumes a session that already holds pages — which is what
+   * `reuseExisting` resumes a session that already holds pages -- which is what
    * makes re-runs cheap, since the bridge caches OCR per page. A session that is
    * mid-finalize or already finalized cannot be resumed (the bridge answers 400
    * "Session is finalizing or already finalized"), so retry once without reuse.
@@ -209,9 +208,39 @@ export class BridgeClient {
     };
     let r = await post(reuseExisting);
     if (reuseExisting && r.status === 400 && /finalizing or already finalized/i.test(r.text || '')) {
-      r = await post(false);   // fresh session
+      r = await post(false);
     }
     if (r.status !== 200) throw new Error(`session/start ${r.status}: ${(r.text || '').slice(0, 200)}`);
+    return r.json;
+  }
+
+  /**
+   * VENDORED ADDITION, not upstream: sync a same-machine folder into a session.
+   *
+   * `POST /session/resume` with `source_dir` is the bridge's own folder-ingest
+   * route. It copies the images out of a local directory, queues OCR for the pages
+   * with no valid cache and skips the ones already done, so a whole volume costs
+   * one request instead of one per page. The source directory is read, never
+   * moved (`_copy_no_follow`), and the bridge only accepts paths under $HOME or
+   * the system temp roots, answering 403 otherwise.
+   *
+   * The result carries `session_id`, `synced_from_source`, `queued_for_ocr` and
+   * `ocr_cached`. This is the same call `mokuro-bridge/ocr_folder.py` makes.
+   */
+  async resumeSession(title, sourceDir, { timeoutMs = 15 * 60 * 1000 } = {}) {
+    const { body, contentType } = multipart({
+      title: String(title || 'manga'),
+      source_dir: String(sourceDir || ''),
+    });
+    const r = await request(this.baseUrl, 'POST', '/session/resume',
+      { body, headers: { 'Content-Type': contentType }, timeoutMs, json: true });
+    if (r.status !== 200) {
+      // `.status` is what lets the caller tell "this bridge does not know the
+      // route" and "this path is not ingestable" from a real failure.
+      const error = new Error(`session/resume ${r.status}: ${(r.text || '').slice(0, 200)}`);
+      error.status = r.status;
+      throw error;
+    }
     return r.json;
   }
 
@@ -310,7 +339,15 @@ export class BridgeClient {
           buf = lines.pop() || '';
           for (const line of lines) handle(line);
         });
-        res.on('end', () => { if (buf.trim()) handle(buf); resolve(done); });
+        // A stream that ends without a done frame is a truncated upload. The
+        // sibling BookWalker client throws here; resolving null made the two
+        // clients disagree about the same failure, and the volume looked handed
+        // off with a null output dir.
+        res.on('end', () => {
+          if (buf.trim()) handle(buf);
+          if (done) resolve(done);
+          else reject(new Error('finalize stream ended without a done event'));
+        });
         const handle = line => {
           if (!line.trim()) return;
           let ev; try { ev = JSON.parse(line); } catch { return; }
@@ -327,8 +364,6 @@ export class BridgeClient {
     });
   }
 }
-
-export function readFileBuffer(p) { return fs.readFileSync(p); }
 
 /**
  * Resolve a user-facing destination into finalize parameters.

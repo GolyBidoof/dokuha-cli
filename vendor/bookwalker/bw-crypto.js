@@ -1,5 +1,5 @@
 /**
- * BookWalker viewer protocol — crypto & descramble primitives.
+ * BookWalker viewer protocol -- crypto & descramble primitives.
  *
  * A faithful Node port of the tile-descramble + configuration_pack.json
  * decryption from GolyBidoof/bookwalker-native-downloader (MIT), which itself
@@ -8,14 +8,14 @@
  * preserved verbatim to avoid silent drift.
  *
  * Three pieces:
- *   1. decodeConfig(text)  — decrypt the custom-base64 configuration_pack.json
+ *   1. decodeConfig(text) -- decrypt the custom-base64 configuration_pack.json
  *                            envelope → page manifest JSON (+ k1/k2/k3 keys).
- *   2. pageSeeds(...)      — per-page descramble seeds from the manifest.
- *   3. descramblePage(rgba, w, h, seeds) — reverse the 32×32 tile shuffle on
+ *   2. pageSeeds(...) -- per-page descramble seeds from the manifest.
+ *   3. descramblePage(rgba, w, h, seeds) -- reverse the 32×32 tile shuffle on
  *                            raw RGBA pixels; crop to the declared Size.
- *   4. b8gNo(pageId, k1, k2, k3, no) — CDN image filename token.
+ *   4. b8gNo(pageId, k1, k2, k3, no) -- CDN image filename token.
  *
- * Pure functions only — no DOM, no fetch. Block moves run on typed arrays, so
+ * Pure functions only -- no DOM, no fetch. Block moves run on typed arrays, so
  * this is safe in plain Node.
  */
 
@@ -266,7 +266,7 @@ function A6e(st) {
 
 /**
  * Decrypt the configuration_pack.json envelope.
- * Returns { config, k1, k2, k3, plaintext } — `config` is the parsed page
+ * Returns { config, k1, k2, k3, plaintext } -- `config` is the parsed page
  * manifest; k1/k2/k3 are the 32-byte key registers (needed for page seeds +
  * CDN filename tokens). `plaintext` is true when the pack was already plain
  * JSON (trial/sample viewer) with no keys.
@@ -576,7 +576,7 @@ function descramblePage(rgba, width, height, seeds) {
     const S = seeds && seeds.Size;
     if (S && S.Width && S.Height && (w !== S.Width || h !== S.Height)) {
         // Crop to declared size: draw the (descrambled) full frame onto a
-        // S.Width×S.Height canvas — same as the reference's cropToSize.
+        // S.Width×S.Height canvas -- same as the reference's cropToSize.
         const dw = S.Width, dh = S.Height;
         const cropped = new Uint8ClampedArray(dw * dh * 4);
         const copyW = Math.min(dw, w), copyH = Math.min(dh, h);
@@ -668,6 +668,5 @@ module.exports = {
     descramblePage,
     A9p,
     b8gNo,
-    // exposed for testing/debugging
     _internals: { A8j, A3b, B0p, A7L, A6I, A2F, B0L, tB0l, B2y, a3f, v_qpg },
 };

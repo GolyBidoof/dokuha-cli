@@ -1,68 +1,32 @@
-/**
- * CMOA (Comic Cmoa) support, driving the vendored pure-Node engine.
- *
- * CMOA serves a scrambled "SpeedBinb" viewer. The engine reverses it offline, so
- * this adapter's job is only to resolve what the user asked for into a set of
- * volumes, then download each one and report progress.
- */
-
-import path from 'node:path';
 import fsp from 'node:fs/promises';
 
 import { openVolume, downloadVolume } from '../../vendor/cmoa/src/downloader.js';
+import { timed } from '../phase-timer.js';
+import { volumeFolder, writeVolumeMarker } from './volume-folder.js';
+import { dedupeBy, fetchText, mapLimit, reject } from '../series.js';
 
-/** How many volumes to probe at once when expanding a title page. */
 const PROBE_CONCURRENCY = 4;
 
-/**
- * Stop scanning a series after this many consecutive missing volumes.
- *
- * A gap is not the end of a series, so stopping at the first miss would silently
- * drop later volumes; but scanning forever costs a request per number, so a run
- * of misses is treated as the end.
- */
 const MISS_LIMIT = 4;
 
-/**
- * CMOA content id for a title and volume.
- *
- * The title id is zero-padded to ten digits and the volume to four, so title
- * 167701 volume 2 is `0000167701_jp_0002`. The leading zeroes are pure padding.
- */
+const MAX_SERIES_PAGES = 50;
+
+const ORIGIN = 'https://www.cmoa.jp';
+
 export function cmoaCid(titleId, volume) {
     return `${String(titleId).padStart(10, '0')}_jp_${String(volume).padStart(4, '0')}`;
 }
 
-/**
- * Retry and timeout options for a single CMOA request.
- *
- * Passing `undefined` lets the engine apply its own default rather than this
- * adapter inventing one, which keeps `--retries` an override instead of a
- * second, quietly-different policy.
- */
 function retryOptions(ctx) {
     if (ctx?.retries == null) return {};
     return { retries: ctx.retries };
 }
 
-/** The viewer URL CMOA itself uses, kept identical so nothing downstream differs. */
 export function cmoaViewerUrl(cid, returnUrl) {
     const back = returnUrl ? `&rurl=${encodeURIComponent(returnUrl)}` : '';
     return `https://www.cmoa.jp/bib/speedreader/?cid=${cid}&u0=1${back}`;
 }
 
-/**
- * Probe one cid to see whether that volume exists and can really be read.
- *
- * A missing cid answers `result=-120`, which is the normal end of a series.
- * Checking only that would still accept a volume whose metadata resolves but whose
- * images do not, so the first page is fetched for real as the proof: a metadata
- * call is cheap and can succeed for content the CDN then refuses.
- *
- * @returns {Promise<{cid: string, pages: number, title: string}|null>} null means
- *   "not downloadable". Transient network errors are rethrown rather than
- *   swallowed, so a flaky request is never mistaken for the end of a series.
- */
 export async function probeCmoaVolume(cid, ctx = {}) {
     let volume;
     try {
@@ -73,31 +37,25 @@ export async function probeCmoaVolume(cid, ctx = {}) {
     }
     if (!volume.pageCount) return null;
     try {
-        // The cheapest possible proof: one page, smallest acceptable quality.
-        // `fetchPage` takes the page object (its `src` is the real image path),
-        // not an index; passing 0 sends `src=undefined` and 403s.
+
         const bytes = await volume.fetchPage(volume.pages[0], { quality: '1' });
         if (!bytes || bytes.length < 1024) return null;
     } catch (error) {
-        // A refusal for this one volume is not a reason to abort the scan.
+
         if (/HTTP 40[13]/.test(error.message)) return null;
         throw error;
     }
     return { cid, pages: volume.pageCount, title: volume.subtitle || volume.title };
 }
 
-/**
- * Find every volume of a CMOA series.
- *
- * The list is not published anywhere, so it is discovered by probing in batches.
- */
 export async function scanCmoaTitle(titleId, limit, scanCtx = {}) {
     const found = [];
     let misses = 0;
     for (let base = 1; base <= limit && misses < MISS_LIMIT; base += PROBE_CONCURRENCY) {
         const batch = [];
         for (let v = base; v < base + PROBE_CONCURRENCY && v <= limit; v++) {
-            batch.push(probeCmoaVolume(cmoaCid(titleId, v), scanCtx).then((r) => ({ v, r })));
+            batch.push(probeCmoaVolume(cmoaCid(titleId, v), scanCtx)
+                .then((r) => ({ v, r }), () => ({ v, r: null })));
         }
         const settled = (await Promise.all(batch)).sort((a, b) => a.v - b.v);
         for (const { v, r } of settled) {
@@ -112,13 +70,6 @@ export async function scanCmoaTitle(titleId, limit, scanCtx = {}) {
     return found;
 }
 
-/**
- * Expand one CMOA input into concrete volume tasks.
- *
- * @param {object} det result from `detectSource`
- * @param {object} config parsed options
- * @returns {Promise<{tasks: object[], rejected: {input: string, error: string}[]}>}
- */
 export async function resolveCmoaInput(det, config, input) {
     const wantsAll = /^(all|\*)$/i.test(config.cmVolume);
     const fromFlag = wantsAll
@@ -132,8 +83,6 @@ export async function resolveCmoaInput(det, config, input) {
         };
     }
 
-    // A /vol/<n>/ in the URL is more specific than the flag, so it wins: that is
-    // the whole point of pasting a volume-specific link.
     const wanted = det.volume != null ? [det.volume] : fromFlag;
     const make = (volume, cid) => ({
         input,
@@ -157,49 +106,58 @@ export async function resolveCmoaInput(det, config, input) {
     return { tasks: found.map((entry) => make(entry.volume, entry.cid)), rejected: [] };
 }
 
-/**
- * Download one CMOA volume.
- *
- * @param {object} task `{ cid, key, title? }`
- * @param {object} ctx `{ out, titleDir, concurrency, jobs, force, format, quality, progress }`
- * @returns {Promise<object>} a uniform store record
- */
 export async function downloadCmoa(task, ctx) {
-    const volume = await openVolume(task.cid, retryOptions(ctx));
+    const volume = await timed(ctx.timer, 'handshake', () => openVolume(task.cid, retryOptions(ctx)));
     const title = volume.subtitle || task.cid;
 
-    // Surface the real title immediately: opening the volume costs a round trip,
-    // so without this the row shows a bare cid until the download finishes.
     ctx.progress?.update(task.key, { label: title, total: volume.pageCount, phase: 'downloading' });
 
-    const folder = path.join(ctx.out, ctx.titleDir ? safeFolderName(title, task.cid) : task.cid);
+    const folder = await volumeFolder(ctx, {
+        title,
+        id: task.cid,
+        sample: task.sample === true,
+    });
     await fsp.mkdir(folder, { recursive: true });
 
-    // Counted locally rather than read back from the display: `--quiet` and
-    // `--json` build no display at all, so reaching into it for bookkeeping
-    // turned every page into a phantom failure.
     let done = 0;
+    let rebuilt = 0;
     let failed = 0;
 
+    if (ctx.timer) {
+        const inner = volume.fetchPage.bind(volume);
+        volume.fetchPage = (...args) => timed(ctx.timer, 'fetch', () => inner(...args));
+    }
     const result = await downloadVolume(volume, {
         outDir: folder,
-        // `cmoaConcurrency` is the store's own key; `concurrency` is the older
-        // shared one, still honoured so a direct caller keeps working.
+
         concurrency: ctx.cmoaConcurrency ?? ctx.concurrency,
         jobs: ctx.jobs,
         force: ctx.force,
         format: ctx.format,
         ...(ctx.quality != null ? { quality: String(ctx.quality) } : {}),
+        ...(ctx.jpegQuality != null ? { jpegQuality: ctx.jpegQuality } : {}),
         onProgress: (event) => {
             if (event.error) {
                 failed += 1;
                 ctx.progress?.update(task.key, { failed });
                 return;
             }
+            // The engine owns this loop, so it is the only place that can say how
+            // much of a page's time was the CDN and how much was the renderer.
+            // Without the split, a CMOA profile shows a fetch figure and a wall time
+            // and nothing about where the wall actually went.
+            ctx.timer?.add('fetch', event.fetchMs);
+            ctx.timer?.add('rebuild', event.renderMs);
+            ctx.timer?.add('write', event.writeMs);
+            // A page the CDN already served assembled is passed through untouched.
+            // Counting them says whether the renderer is doing work at all.
+            if (event.descrambled) rebuilt += 1;
             done += 1;
             ctx.progress?.update(task.key, { phase: 'downloading', done, total: event.total });
         },
     });
+
+    await timed(ctx.timer, 'write', () => writeVolumeMarker(folder, { store: 'cmoa', id: task.cid, title }));
 
     return {
         store: 'cmoa',
@@ -213,19 +171,119 @@ export async function downloadCmoa(task, ctx) {
         failed: result.failed,
         bytes: result.bytes,
         failures: result.failures || [],
+        rebuilt,
     };
 }
 
-/**
- * Filesystem-safe folder name.
- *
- * CMOA's `volume.title` is the SEO string ("... ｜ 漫画（マンガ）・電子書籍のコミックシーモア"),
- * so callers pass `subtitle` instead; this only makes it safe to write.
- */
-export function safeFolderName(value, fallback = 'volume') {
-    const base = String(value ?? '')
-        .replace(/[/\\:*?"<>|]+/g, '_')
-        .replace(/\s+/g, ' ')
-        .trim();
-    return base.slice(0, 80).replace(/[. ]+$/, '') || fallback;
+export async function resolveCmoaSeries(det, input, options = {}) {
+    const ctx = { ...options, origin: ORIGIN };
+    const titleId = det.titleId || cmoaTitleIdFromCid(det.cid);
+    if (!titleId) return reject(input, `could not read a CMOA title id out of "${input}"`);
+
+    const pageUrl = (page) => `${ORIGIN}/title/${titleId}/?order=up${page > 1 ? `&page=${page}` : ''}`;
+
+    const first = parseCmoaSeriesPage(await fetchText(pageUrl(1), ctx), titleId);
+    if (!first.volumes.length) {
+        return reject(input, `CMOA title ${titleId} listed no volumes on its title page`);
+    }
+
+    const last = Math.min(first.lastPage, MAX_SERIES_PAGES);
+    const rest = await mapLimit(
+        Array.from({ length: Math.max(0, last - 1) }, (_, i) => i + 2),
+        PROBE_CONCURRENCY,
+        async (page) => parseCmoaSeriesPage(await fetchText(pageUrl(page), ctx), titleId).volumes,
+    );
+    const volumes = dedupeBy(first.volumes.concat(...rest), (v) => v.volume);
+    const free = volumes.filter((v) => v.free);
+    const samplers = ctx.samplers ? volumes.filter((v) => !v.free && v.sample) : [];
+
+    if (!free.length && !samplers.length) {
+        const tail = ctx.samplers ? ', and it offers no 試し読み samplers either' : ' right now';
+        return reject(input, `CMOA title ${titleId} has ${volumes.length} volumes and none of them are free${tail}`);
+    }
+
+    const make = (v, sample) => ({
+        input,
+        kind: 'cmoa',
+        cid: v.cid,
+        target: v.cid,
+        url: cmoaViewerUrl(v.cid, det.url),
+        volume: v.volume,
+        fromTitleId: titleId,
+        fromSeries: true,
+        ...(sample ? { sample: true } : {}),
+    });
+    const tasks = free.map((v) => make(v, false)).concat(samplers.map((v) => make(v, true)));
+    const note = `CMOA title ${titleId}: ${free.length} of ${volumes.length} volumes are free`
+        + (samplers.length ? `, plus ${samplers.length} 試し読み samplers` : '');
+    return { tasks, rejected: [], notes: [note] };
+}
+
+export const platform = {
+    name: 'CMOA',
+    id: 'cmoa',
+    label: 'CMOA',
+    lane: 'cpu',
+    workerKey: 'cmoa',
+    patterns: [
+        { re: /cmoa\.jp\/title\/(\d+)\/vol\/(\d+)/i, kind: 'cmoa-title',
+            build: (m, raw) => ({ kind: 'cmoa-title', titleId: m[1], volume: Number(m[2]), url: raw }) },
+        { re: /cmoa\.jp\/title\/(\d+)/i, kind: 'cmoa-title',
+            build: (m, raw) => ({ kind: 'cmoa-title', titleId: m[1], volume: null, url: raw }) },
+        { re: /cmoa\.jp\/bib\/speedreader\/?\?[^\s]*?cid=(\d{10}_jp_\d{4})/i, kind: 'cmoa',
+            build: (m, raw) => ({ kind: 'cmoa', cid: m[1], url: raw }) },
+        { re: /^(\d{10}_jp_\d{4})$/, kind: 'cmoa',
+            build: (m, raw) => ({ kind: 'cmoa', cid: m[1], url: raw }) },
+    ],
+    volumeId: (det) => det.cid ?? null,
+    expand: (det) => det.kind === 'cmoa-title',
+    resolve: resolveCmoaInput,
+    series: resolveCmoaSeries,
+    download: downloadCmoa,
+};
+
+export function parseCmoaLastPage(html) {
+    let last = 1;
+    for (const m of String(html ?? '').matchAll(/order=[a-z]+(?:&amp;|&)page=(\d+)/gi)) {
+        const page = Number(m[1]);
+        if (page > last) last = page;
+    }
+    return last;
+}
+
+export function parseCmoaSeriesPage(html, titleId) {
+    const body = String(html ?? '');
+
+    const marker = '<div class="title_vol_vox_vols_i clearfix"';
+    const listAt = body.indexOf('id="comic_list"');
+    const firstBlock = body.indexOf(marker, listAt >= 0 ? listAt : 0);
+    const endAt = firstBlock >= 0 ? body.indexOf('class="pagination"', firstBlock) : -1;
+    const scope = firstBlock >= 0
+        ? body.slice(firstBlock, endAt > firstBlock ? endAt : body.length)
+        : '';
+
+    const padded = String(titleId).padStart(10, '0');
+    const volumes = [];
+    for (const block of scope.split(marker).slice(1)) {
+
+        const contentId = (/_content_id="(\d+)"/.exec(block) || [])[1] || '';
+        const chapter = (/_chapter_no_s="(\d+)"/.exec(block) || [])[1] || '';
+        const composed = /^1(\d{10})(\d{4})$/.exec(contentId);
+        const volume = composed && composed[1] === padded
+            ? Number(composed[2])
+            : (chapter ? Number(chapter) : null);
+        if (!volume || volume < 1) continue;
+
+        const free = /GA_free btn free/.test(block) && block.includes('無料で読む');
+
+        const sample = /\/reader\/sample\//.test(block);
+        volumes.push({ volume, cid: cmoaCid(titleId, volume), free, sample });
+    }
+
+    return { volumes: dedupeBy(volumes, (v) => v.volume), lastPage: parseCmoaLastPage(body) };
+}
+
+export function cmoaTitleIdFromCid(cid) {
+    const m = /^(\d{10})_jp_\d{4}$/.exec(String(cid ?? ''));
+    return m ? String(Number(m[1])) : null;
 }

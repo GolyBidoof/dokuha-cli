@@ -25,7 +25,6 @@
  * touches a process-global fetch shim, so those are serialised deliberately.
  * Only the image transfers run in parallel, which is where the time actually is.
  */
-import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';

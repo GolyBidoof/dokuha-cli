@@ -1,33 +1,30 @@
-/**
- * BookWalker support, driving the vendored browserless licence sampler.
- *
- * Two routes exist and they are chosen by the sampler, not by us:
- *
- *   free   the anonymous handshake, which is what a "free to read" or `?sample=2`
- *          volume needs. No account, no cookies, no browser.
- *   trial  the separate trial viewer and licence endpoint.
- *
- * A signed-in session is only required for titles already in a library. It is
- * supplied either as a saved session or as explicit cookies.
- */
 
 import path from 'node:path';
 import fsp from 'node:fs/promises';
 import { createRequire } from 'node:module';
 
 import { startBridgeSession } from '../bridge.js';
-import { safeFolderName } from './cmoa.js';
+import { timed } from '../phase-timer.js';
+import { volumeFolder, writeVolumeMarker } from './volume-folder.js';
 import { BwNormalizePool, defaultNormalizeWorkers } from './bw-normalize-pool.js';
+import { pageFileName, stampPageTimes } from './page-files.js';
+import {
+    MAX_SERIES_PAGES,
+    dedupeBookwalkerVolumes,
+    fetchText,
+    parseBookwalkerNextPage,
+    parseBookwalkerSeriesId,
+    parseBookwalkerSeriesList,
+    parseVolumeNumber,
+    reject,
+} from '../series.js';
 
-// The sampler is CommonJS, so it is loaded through require rather than imported.
 const require = createRequire(import.meta.url);
 
-/** The auth parameters the CDN licence expects, in the sampler's own order. */
 const AUTH_PARAM_KEYS = ['hti', 'cfg', 'bid', 'uuid', 'pfCd', 'Policy', 'Signature', 'Key-Pair-Id'];
 
 let sampler = null;
 
-/** Load the vendored sampler once. */
 function loadSampler() {
     if (!sampler) {
         const freeVolume = require('../../vendor/bookwalker/free-volume.js');
@@ -39,20 +36,14 @@ function loadSampler() {
             readCookieArgument: freeVolume.readCookieArgument,
             runPublicTrialJob: publicTrial.runPublicTrialJob,
             BridgeClient: bridgeClient.BridgeClient,
+
+            readLicence: freeVolume.readLicence,
+            writeLicence: freeVolume.writeLicence,
         };
     }
     return sampler;
 }
 
-/**
- * Check that `sharp` is available before a BookWalker page is attempted.
- *
- * BookWalker's public pages are encrypted and need `sharp` to decode. It is an
- * optional dependency, because the other two stores never touch it, so the failure
- * has to be explained here rather than surfacing as a decode error per page. The
- * sampler's own message ("Encrypted public pages require the optional sharp image
- * dependency") does not say how to fix it, which is the gap this closes.
- */
 export function assertSharpAvailable() {
     try {
         require('sharp');
@@ -66,26 +57,95 @@ export function assertSharpAvailable() {
     }
 }
 
-/**
- * Build the cookie argument the sampler expects, if any were given.
- *
- * Parsing is delegated to the sampler so every shape keeps working: a raw
- * `Cookie:` header, a `Copy as cURL` command, `@FILE`, a bare path, or `-` for
- * stdin. Each argument becomes one header, merged last-wins by name. Done at call
- * time because `-` reads stdin, which must not happen during argument parsing.
- */
 function cookieArgument(config) {
     if (!config.bwCookies.length) return undefined;
     const { mergeCookies, readCookieArgument } = loadSampler();
     return mergeCookies(config.bwCookies.map((arg) => readCookieArgument(arg)));
 }
 
-/**
- * Explain a refused licence in terms of what the user can do about it.
- *
- * A bare "status 400" is the least useful outcome of the three routes, and it is
- * the one users hit most often when a saved session has simply gone stale.
- */
+export function createBookwalkerCarrier() {
+    return { options: null, session: null, cookie: null, cr: null, prewarm: null };
+}
+
+export function allowsSharing(config) {
+    return config.bwCookies.length === 0 && !config.bwSample && !config.bwEntry && !config.bwNoCr;
+}
+
+function optionsFor(carrier, config) {
+    if (carrier && carrier.options) return carrier.options;
+    const options = {
+        cookie: cookieArgument(config),
+        cr: config.bwNoCr ? null : (config.bwCr || undefined),
+        bid: undefined,
+        u1: config.bwU1 || undefined,
+        route: config.bwSample ? 'sample' : undefined,
+        entry: config.bwEntry || undefined,
+        stateFile: config.bwNoState ? null : (config.bwState || undefined),
+    };
+    if (carrier) carrier.options = options;
+    return options;
+}
+
+export function prewarmBookwalker(carrier, cid, config) {
+
+    if (!cid || !carrier || carrier.prewarm || carrier.session || !allowsSharing(config)) return null;
+    const { openFreeSession, readLicence } = loadSampler();
+    const options = optionsFor(carrier, config);
+
+    if (!config.bwNoState && readLicence(cid, { stateFile: options.stateFile })) return null;
+    carrier.prewarm = (async () => {
+        const session = await openFreeSession(cid, options);
+        if (session?.payload?.status === '200' && session.jar) {
+            carrier.session = session;
+            carrier.cookie = session.jar.header();
+            carrier.cr = session.cr;
+        }
+        return session;
+    })().catch(() => null);
+    return carrier.prewarm;
+}
+
+const licenceKey = (cid, sample) => (sample ? `${cid}-sample` : cid);
+
+async function negotiateSession(cid, config, carrier, sample = false) {
+    const { openFreeSession, readLicence } = loadSampler();
+
+    const anonymous = !sample && allowsSharing(config);
+    const base = optionsFor(carrier, config);
+    const options = sample ? { ...base, route: 'sample' } : base;
+    const key = licenceKey(cid, sample);
+
+    if (!config.bwNoState && (anonymous || sample)) {
+        const cached = readLicence(key, { stateFile: options.stateFile });
+        if (cached) return { cid, payload: cached, jar: null, cr: null, crSource: 'cached licence', cached: true };
+    }
+
+    if (carrier && anonymous) {
+        if (carrier.prewarm) {
+            await carrier.prewarm;
+            carrier.prewarm = null;
+        }
+
+        if (carrier.session && carrier.session.cid === cid && carrier.session.payload?.status === '200') {
+            return carrier.session;
+        }
+        if (carrier.cookie) {
+            const bound = await openFreeSession(cid, {
+                ...options, cookie: carrier.cookie, route: 'bind', cr: carrier.cr || undefined,
+            });
+            if (bound.payload?.status === '200') return bound;
+        }
+    }
+
+    const session = await openFreeSession(cid, options);
+    if (carrier && anonymous && session.payload?.status === '200' && session.jar) {
+        carrier.session = session;
+        carrier.cookie = session.jar.header();
+        carrier.cr = session.cr;
+    }
+    return session;
+}
+
 function licenceError(payload, config) {
     const status = payload?.status ? ` (BookWalker status ${payload.status})` : '';
     const signedIn = config.bwCookies.length > 0 || !config.bwNoState;
@@ -100,78 +160,56 @@ function licenceError(payload, config) {
     return `BookWalker did not grant a licence${status}.\n  ${hints.join('\n  ')}`;
 }
 
-/**
- * Download one BookWalker volume.
- *
- * @param {object} task `{ cid, target, key, title? }`
- * @param {object} ctx `{ out, titleDir, config, progress, bridge }` where
- *   `bridge` is `{ baseUrl, client, destInfo }` when OCR was requested.
- * @returns {Promise<object>} a uniform store record
- */
 export async function downloadBookwalker(task, ctx) {
     assertSharpAvailable();
-    const { openFreeSession, runPublicTrialJob, BridgeClient: BwBridgeClient } = loadSampler();
+    const { runPublicTrialJob, BridgeClient: BwBridgeClient } = loadSampler();
     const { config, progress } = ctx;
     const wantOcr = Boolean(ctx.bridge);
 
-    // The handshake also resolves the title, so the folder is created under a
-    // provisional name and renamed once the real title is known.
-    const stage = path.join(ctx.out, config.titleDir ? 'pending' : task.cid);
-    await fsp.mkdir(stage, { recursive: true });
-
-    const session = await openFreeSession(task.cid, {
-        cookie: cookieArgument(config),
-        cr: config.bwNoCr ? null : (config.bwCr || undefined),
-        bid: undefined,
-        u1: config.bwU1 || undefined,
-        route: config.bwSample ? 'sample' : undefined,
-        entry: config.bwEntry || undefined,
-        stateFile: config.bwNoState ? null : (config.bwState || undefined),
-    });
+    const sample = task.sample === true;
+    const session = await timed(ctx.timer, 'handshake', () => negotiateSession(task.cid, config, ctx.bwCarrier, sample));
 
     const payload = session.payload;
     if (!payload || payload.status !== '200' || !payload.auth_info || !payload.url) {
         throw new Error(licenceError(payload, config));
     }
 
-    const title = String(payload.cti || task.cid);
-    const folder = config.titleDir ? path.join(ctx.out, safeFolderName(title, task.cid)) : stage;
-    if (folder !== stage) {
-        await fsp.rename(stage, folder).catch(() => {});
-        await fsp.mkdir(folder, { recursive: true });
+    if (!config.bwNoState && !session.cached && (sample || allowsSharing(config))) {
+        try {
+            const stateFile = optionsFor(ctx.bwCarrier, config).stateFile;
+            loadSampler().writeLicence(licenceKey(task.cid, sample), payload, { stateFile });
+        } catch {  }
     }
 
-    // The manifest sits directly under the licence base URL. The viewer's quality
-    // buckets (`normal_default/`, `large_default/`, `x-large_default/`) are probed
-    // first by the sampler and all answer 403 on this route, which reads exactly
-    // like a licence problem; only the bare path works.
+    const title = String(payload.cti || task.title || task.cid);
+    const folder = await volumeFolder(ctx, { title, id: task.cid, sample });
+    await fsp.mkdir(folder, { recursive: true });
+
     const baseUrl = String(payload.url).replace(/\/*$/, '/');
     const auth = payload.auth_info;
     const authParams = new URLSearchParams();
     for (const key of AUTH_PARAM_KEYS) {
         if (auth[key] != null) authParams.set(key, String(auth[key]));
     }
-    const manifestRes = await fetch(`${baseUrl}configuration_pack.json?${authParams.toString()}`, {
-        headers: { 'User-Agent': ctx.userAgent },
+    // Preparation, not a handshake: the licence is already in hand, and this is the
+    // volume's page manifest. The engines that own their page loop have no seam here,
+    // so BookWalker is one of the stores that can actually separate the two.
+    const configBody = await timed(ctx.timer, 'prework', async () => {
+        const res = await fetch(`${baseUrl}configuration_pack.json?${authParams.toString()}`, {
+            headers: { 'User-Agent': ctx.userAgent },
+        });
+        if (!res.ok) throw new Error(`BookWalker manifest HTTP ${res.status}`);
+        return res.text();
     });
-    if (!manifestRes.ok) throw new Error(`BookWalker manifest HTTP ${manifestRes.status}`);
-    const configBody = await manifestRes.text();
 
-    // The sampler builds its own client; wrap it so pages it considers already
-    // OCR'd are counted as cache hits rather than uploads.
     const tolerant = wantOcr ? new TolerantBridge(new BwBridgeClient({ baseUrl: ctx.bridge.baseUrl })) : null;
 
-    // Encrypted pages are un-permuted and re-encoded in worker threads instead
-    // of on the event loop that drives the fetches. The guard is deliberately
-    // the same one the inline path uses: a plaintext manifest, or a page with no
-    // seeds, must be handed straight back rather than decoded and re-encoded --
-    // otherwise the pool would cost more than it saves on unencrypted books.
     const normalizer = new BwNormalizePool(
         Number(ctx.normalizeWorkers) > 0 ? Number(ctx.normalizeWorkers) : defaultNormalizeWorkers(),
     );
     const normalizePage = (data, job, manifest) => {
         if (manifest.decoded.plaintext || !job.seeds) return data;
-        return normalizer.normalize(data, job.seeds);
+        return timed(ctx.timer, 'rebuild', () => normalizer.normalize(data, job.seeds));
     };
 
     let result;
@@ -189,17 +227,30 @@ export async function downloadBookwalker(task, ctx) {
             },
             configBody,
             outputDir: folder,
+
+            safeTitle: title,
+
+            pagesAsFiles: !config.zip,
             ocr: wantOcr,
             bridgeUrl: wantOcr ? ctx.bridge.baseUrl : null,
             reuseExisting: true,
             pageConcurrency: ctx.bwConcurrency ?? config.bwConcurrency,
             pageUploadConcurrency: config.pushConcurrency,
             normalizePage,
-            onProgress: (event) => reportBookwalker(event, task, progress),
+            // The engine owns the page loop, so it is the only thing that can say how
+            // much of a page was transport and how much was seam-carving.
+            onPhase: (name, ms) => ctx.timer?.add(name, ms),
+            onProgress: (event) => reportBookwalker(event, task, progress, Boolean(ctx.bridge)),
         });
     } finally {
-        // Never leave workers behind on a failed or cancelled volume.
+
         await normalizer.close();
+    }
+
+
+    if (!config.zip && result.pageCount) {
+        const files = Array.from({ length: result.pageCount }, (_, i) => pageFileName(i + 1, 'jpg'));
+        await stampPageTimes(folder, files);
     }
 
     const record = {
@@ -217,39 +268,59 @@ export async function downloadBookwalker(task, ctx) {
         mode: result.mode,
     };
 
+    await writeVolumeMarker(folder, { store: 'bookwalker', id: task.cid, title });
+
     if (wantOcr) {
-        // The sampler handed the pages to the bridge but deliberately did not
-        // finalize; assembling the .mokuro is this driver's job, exactly as for
-        // the other two stores.
+
         if (!result.bridgeSessionId) throw new Error('BookWalker returned no bridge session to finalize');
         const cached = tolerant ? tolerant.cached : 0;
         record.mokuro = {
             bridge: ctx.bridge.baseUrl,
             sessionId: result.bridgeSessionId,
-            // The sampler reports every page it sent; the ones the bridge refused
-            // as already-OCR'd were cache hits, not uploads.
+
             pagesUploaded: Math.max(0, result.pageCount - cached),
             pagesAlreadyOcr: cached,
             pagesFailed: (result.failures || []).length,
             deferredFinalize: true,
         };
     } else if (result.outputPath) {
-        record.archive = result.outputPath;
-        record.bytes = (await fsp.stat(result.outputPath).catch(() => ({ size: 0 }))).size;
+
+        const measured = await measureOutput(result.outputPath);
+        record.bytes = measured.bytes;
+        if (!measured.directory) record.archive = result.outputPath;
     }
 
     return record;
 }
 
-/** Translate the sampler's progress events into display updates. */
-function reportBookwalker(event, task, progress) {
+async function measureOutput(target) {
+    const st = await fsp.stat(target).catch(() => null);
+    if (!st) return { bytes: 0, directory: false };
+    if (!st.isDirectory()) return { bytes: st.size, directory: false };
+
+    const entries = await fsp.readdir(target, { withFileTypes: true }).catch(() => []);
+    let bytes = 0;
+    for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        bytes += (await fsp.stat(path.join(target, entry.name)).catch(() => ({ size: 0 }))).size;
+    }
+    return { bytes, directory: true };
+}
+
+function reportBookwalker(event, task, progress, bridged = false) {
     const key = task.key;
     switch (event.type) {
         case 'book-total':
             progress?.update(key, { total: event.total, label: event.title || task.title });
             break;
         case 'download-progress':
-            progress?.update(key, { phase: 'downloading', done: event.pageCount, total: event.total });
+
+            progress?.update(key, {
+                phase: 'downloading',
+                done: event.pageCount,
+                total: event.total,
+                ...(event.bytes != null ? { bytes: event.bytes } : {}),
+            });
             break;
         case 'download-error':
             progress?.update(key, { failed: (progress.get(key)?.failed || 0) + 1 });
@@ -269,22 +340,15 @@ function reportBookwalker(event, task, progress) {
             break;
         case 'zip-start':
         case 'zip-complete':
-            progress?.update(key, { phase: 'finalizing' });
+
+            if (!bridged) progress?.update(key, { phase: 'finalizing' });
             break;
         default:
-            // Unknown event types are ignored on purpose: the sampler may add
-            // more, and a new one should not break a run.
+
             break;
     }
 }
 
-/**
- * Wrap a bridge client so an already-OCR'd page counts as a cache hit.
- *
- * The bridge answers 409 "Page already has completed OCR" when a page is pushed
- * twice. That is the mechanism that makes a re-run resume, so it is a success, not
- * an error. Everything else is forwarded unchanged rather than reimplemented.
- */
 class TolerantBridge {
     constructor(inner) {
         this.inner = inner;
@@ -310,8 +374,85 @@ class TolerantBridge {
         }
     }
 
-    /** Route the sampler's session start through the shared reuse fallback. */
     startSession(title, options) {
         return startBridgeSession(this.inner, title, options);
     }
 }
+
+const BW_ORIGIN = 'https://bookwalker.jp';
+
+export async function resolveBookwalkerSeries(det, input, ctx = {}) {
+    let seriesId = det.seriesId || null;
+    if (!seriesId) {
+        if (!det.cid) return reject(input, `could not read a BookWalker volume id out of "${input}"`);
+        seriesId = parseBookwalkerSeriesId(await fetchText(`${BW_ORIGIN}/de${det.cid}/`, ctx));
+        if (!seriesId) return reject(input, `BookWalker volume ${det.cid} does not link to a series`);
+    }
+
+    let html = await fetchText(`${BW_ORIGIN}/series/${seriesId}/list/`, ctx);
+    const items = parseBookwalkerSeriesList(html);
+    let next = parseBookwalkerNextPage(html);
+    for (let pages = 1; next && pages < MAX_SERIES_PAGES; pages++) {
+        html = await fetchText(new URL(next, `${BW_ORIGIN}/series/${seriesId}/list/`).toString(), ctx);
+        items.push(...parseBookwalkerSeriesList(html));
+        next = parseBookwalkerNextPage(html);
+    }
+
+    if (!items.length) return reject(input, `BookWalker series ${seriesId} listed no volumes`);
+
+    const free = dedupeBookwalkerVolumes(items.filter((item) => item.free));
+    const freeVolumes = new Set(free.map((item) => parseVolumeNumber(item.title)).filter((v) => v != null));
+    const samplers = ctx.samplers
+        ? dedupeBookwalkerVolumes(items.filter((item) => !item.free && item.sample
+            && !freeVolumes.has(parseVolumeNumber(item.title))))
+        : [];
+    if (!free.length && !samplers.length) {
+        const tail = ctx.samplers ? ', and it offers no 試し読み samplers either' : ' right now';
+        return reject(input, `BookWalker series ${seriesId} has ${items.length} volumes and none of them are free${tail}`);
+    }
+
+    const make = (item, sample) => ({
+        input,
+        kind: 'bookwalker',
+        cid: item.uuid,
+        target: item.uuid,
+        url: `${BW_ORIGIN}/de${item.uuid}/`,
+        title: item.title,
+        fromSeries: true,
+        ...(sample ? { sample: true } : {}),
+    });
+    const tasks = free.map((item) => make(item, false)).concat(samplers.map((item) => make(item, true)));
+    const note = `BookWalker series ${seriesId}: ${free.length} of ${items.length} volumes are free`
+        + (samplers.length ? `, plus ${samplers.length} 試し読み samplers` : '');
+    return { tasks, rejected: [], notes: [note] };
+}
+
+const BW_UUID = '(?:de)?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})';
+
+const volumePattern = {
+    kind: 'bookwalker',
+    re: new RegExp(`bookwalker\\.jp\\/${BW_UUID}`, 'i'),
+    build: (m, raw) => ({
+        kind: 'bookwalker',
+        cid: m[1].toLowerCase(),
+        url: `https://bookwalker.jp/de${m[1].toLowerCase()}/`,
+    }),
+};
+
+export const platform = {
+    name: 'BookWalker',
+    id: 'bookwalker',
+    label: 'BW',
+    lane: 'net',
+    workerKey: 'bookwalker',
+    patterns: [
+        { re: /bookwalker\.jp\/series\/(\d+)/i, kind: 'bookwalker-series',
+            build: (m, raw) => ({ kind: 'bookwalker-series', seriesId: m[1], url: raw }) },
+        volumePattern,
+        { re: new RegExp(`^${BW_UUID}$`, 'i'), kind: 'bookwalker', build: volumePattern.build },
+    ],
+    volumeId: (det) => det.cid ?? null,
+    expand: () => false,
+    series: resolveBookwalkerSeries,
+    download: downloadBookwalker,
+};

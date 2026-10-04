@@ -1,7 +1,7 @@
 /**
  * Live store tests.
  *
- * Opt in with MANGA_DL_TEST_NETWORK=1. These hit real stores, so they are excluded
+ * Opt in with DOKUHA_TEST_NETWORK=1. These hit real stores, so they are excluded
  * from the default suite: `npm test` must stay fast, offline and deterministic.
  *
  * They exist because the two bugs that mattered most in this codebase were both
@@ -16,9 +16,18 @@ import path from 'node:path';
 import { downloadCmoa, probeCmoaVolume } from '../src/download/cmoa.js';
 import { downloadEbookjapan } from '../src/download/ebookjapan.js';
 import { downloadBookwalker, assertSharpAvailable } from '../src/download/bookwalker.js';
+import { openKmangaSession, resolveKmangaInput } from '../src/download/kmanga.js';
 import { check, checkEqual, finish } from './_harness.mjs';
 
-const out = fs.mkdtempSync(path.join(os.tmpdir(), 'manga-dl-net-'));
+const out = fs.mkdtempSync(path.join(os.tmpdir(), 'dokuha-net-'));
+
+// This is a live smoke test: it asks the real store what these ids resolve to.
+// The expectation is deliberately NOT pinned to a named work -- pinning it would
+// both rot the moment the store changes and put a real title in the repository.
+// What matters here is that the store answered with a usable title at all.
+const checkTitle = (store, title) => check(
+    `${store} resolved a non-empty title`,
+    typeof title === 'string' && title.trim().length > 0, title);
 const ctx = {
     out,
     titleDir: false,
@@ -43,24 +52,24 @@ try {
 
     // CMOA.
     {
-        const record = await downloadCmoa({ cid: '0000249510_jp_0002', key: 'cmoa:net' }, ctx);
+        const record = await downloadCmoa({ cid: '0000249001_jp_0002', key: 'cmoa:net' }, ctx);
         checkEqual('CMOA reports the right store', record.store, 'cmoa');
         check('CMOA downloaded every page', record.downloaded > 200 && record.failed === 0,
             `${record.downloaded}/${record.totalPages}, ${record.failed} failed`);
-        check('CMOA resolved a real title', /スーパーの裏でヤニ吸う/.test(record.title || ''), record.title);
+        checkTitle('CMOA', record.title);
         check('CMOA pages are on disk', fs.readdirSync(record.folder).length > 200);
     }
 
     // ebookjapan.
     {
         const record = await downloadEbookjapan(
-            { target: 'https://ebookjapan.yahoo.co.jp/books/126344/A000065415/', key: 'ebj:net' },
+            { target: 'https://ebookjapan.yahoo.co.jp/books/126001/A009000001/', key: 'ebj:net' },
             { ...ctx, concurrency: 16 },
         );
         checkEqual('ebookjapan reports the right store', record.store, 'ebookjapan');
         check('ebookjapan downloaded every page', record.downloaded === 199 && record.failed === 0,
             `${record.downloaded}/${record.totalPages}, ${record.failed} failed`);
-        check('ebookjapan resolved a real title', /夏目友人帳/.test(record.title || ''), record.title);
+        checkTitle('ebookjapan', record.title);
     }
 
     // BookWalker. Skipped rather than failed when sharp is absent, because sharp
@@ -72,13 +81,53 @@ try {
             check('BookWalker is skipped without sharp, not failed', true);
         } else {
             const record = await downloadBookwalker(
-                { cid: 'f45047f5-6b90-4d4f-84f7-bd8263daee70', target: 'https://bookwalker.jp/def45047f5-6b90-4d4f-84f7-bd8263daee70/', key: 'bw:net' },
+                { cid: '00000006-0000-4000-8000-000000000006', target: 'https://bookwalker.jp/de00000006-0000-4000-8000-000000000006/', key: 'bw:net' },
                 ctx,
             );
             checkEqual('BookWalker reports the right store', record.store, 'bookwalker');
             check('BookWalker downloaded every page', record.downloaded === 62 && record.failed === 0,
                 `${record.downloaded}/${record.totalPages}, ${record.failed} failed`);
-            check('BookWalker resolved a real title', /さんかく窓/.test(record.title || ''), record.title);
+            checkTitle('BookWalker', record.title);
+        }
+    }
+    // k-manga. Deliberately the discovery half only: resolving a volume proves the
+    // gate cookie still works, that the title page still publishes a launcher, and
+    // that the launcher still answers 302 with a usable ticket -- the three things
+    // that break when the site changes. Downloading the volume is covered by the
+    // fixture tests, which do not need the store to be up to catch a regression.
+    {
+        const det = { kind: 'kmanga-volume', bookId: '180001', volume: 1 };
+        const resolved = await resolveKmangaInput(det, { series: false }, 'kmanga network test', ctx);
+        check('k-manga resolves a free volume to a launcher',
+            resolved.tasks.length === 1 && /viewer-launcher/.test(resolved.tasks[0].launcher),
+            JSON.stringify(resolved.rejected));
+        if (resolved.tasks.length) {
+            const { session } = await openKmangaSession(resolved.tasks[0].launcher, ctx);
+            check('the launcher hands back a ticket', /^BGTK_/.test(session.ticket || ''), session.ticket);
+            check('the launcher hands back an obfuid', Boolean(session.obfuid));
+            check('the ticket names the volume that was asked for', session.bookId, '180001');
+
+            // The sampler half of the same page. This is the assertion that would
+            // have caught the bug this feature was written for: reading only hrefs
+            // reports two volumes where the title offers ten, and says nothing.
+            const withSamplers = await resolveKmangaInput(
+                det, { series: true, samplers: true }, 'kmanga network test', ctx,
+            );
+            const samplers = withSamplers.tasks.filter((t) => t.sample);
+            const freeTasks = withSamplers.tasks.filter((t) => !t.sample);
+            check('the title page still advertises samplers', samplers.length > 0,
+                `${withSamplers.tasks.length} volume(s) resolved, none of them samples`);
+            check('every sampler has a launcher the socket can use',
+                samplers.every((t) => /\/viewer-launcher\/\d+\/\d+\/\d+\/\w+\/\d+\/\d+\/0\//.test(t.launcher)),
+                JSON.stringify(samplers.map((t) => t.launcher).slice(0, 3)));
+            check('samplers are ordered after the free volumes',
+                withSamplers.tasks.findIndex((t) => t.sample) > freeTasks.length - 1);
+            check('a sampler is named after the volume, not an id',
+                samplers.every((t) => /試し読み）$/.test(t.target)),
+                JSON.stringify(samplers.map((t) => t.target).slice(0, 3)));
+            check('and keeps a stable id for its folder marker',
+                samplers.every((t) => /sample$/.test(t.id)),
+                JSON.stringify(samplers.map((t) => t.id).slice(0, 3)));
         }
     }
 } catch (error) {

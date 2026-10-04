@@ -32,14 +32,14 @@ const MAX_PIECE_COUNT = 64;
  * The viewer's `getRandomString`: a string of `length` characters from the
  * URL-safe base64 alphabet.
  */
-export function randomString(length, random = Math.random) {
+function randomString(length, random = Math.random) {
   let out = '';
   for (let i = 0; i < length; i++) out += B64[(random() * B64.length) | 0];
   return out;
 }
 
 /**
- * The viewer's `Reader.J(cid)` — the `k` query parameter.
+ * The viewer's `Reader.J(cid)` -- the `k` query parameter.
  *
  * 16 random characters, then for each position one additional character chosen
  * by XOR-accumulating the random string against the cid repeated, truncated and
@@ -137,7 +137,8 @@ export function selectScramble(src, tables) {
  * Which descrambler class the viewer picks for a (coordTable, pieceTable) pair.
  *
  * The two strings are self-describing:
- *   '=R-C+X-...'  a tiled permutation of an R x C grid with X pixels of padding
+ *   '=C-R±X-...'  a tiled permutation of a C-across, R-down grid with X pixels
+ *                of padding
  *   '12abc...'    a plain digit-encoded permutation
  *   ''            no scrambling
  */
@@ -150,17 +151,15 @@ export function describeScramble(coordTable, pieceTable) {
   return 'unknown';
 }
 
-/** Parse a `=R-C+X-BODY` scramble pattern. */
+/** Parse a `=C-R±PAD-BODY` scramble pattern (C across, R down). */
 export function parseTiledPattern(pattern) {
   const m = /^=([0-9]+)-([0-9]+)([-+])([0-9]+)-([-_0-9A-Za-z]+)$/.exec(String(pattern));
   if (!m) return null;
   return {
-    rows: parseInt(m[1], 10),
-    cols: parseInt(m[2], 10),
+    across: parseInt(m[1], 10),
+    down: parseInt(m[2], 10),
     sign: m[3],
     padding: parseInt(m[4], 10),
     body: m[5],
   };
 }
-
-export const constants = { MAX_PIECE_AXIS, MAX_PIECE_COUNT };

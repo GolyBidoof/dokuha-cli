@@ -27,6 +27,11 @@ const tables = FIXTURE.tables;
 /**
  * Verbatim port of the viewer's `f.prototype.Ot`, used as the reference.
  * `kt`/`Lt`/`Nt`/`Rt`/`Ft` and `T`/`j`/`Dt` are the bundle's names.
+ *
+ * Note the spans: the bundle sizes a source tile from the *stored* grid
+ * (`Lt`/`Nt`), not the display grid, which is easy to transcribe wrongly
+ * because `Ct` returns the two coordinate runs in the opposite order to the
+ * names they are then assigned to.
  */
 function refTiledRegions(kt, Lt, Nt, Rt, Ft, T, j, Dt, width, height) {
   const It = (w, h) => {
@@ -51,8 +56,8 @@ function refTiledRegions(kt, Lt, Nt, Rt, Ft, T, j, Dt, width, height) {
     const d = Math.floor(kt[o] / T);
     const b = v * r + (Rt[d] < v ? e - r : 0);
     const g = d * s + (Ft[v] < d ? h - s : 0);
-    const p = Rt[d] === v ? e : r;
-    const m = Ft[v] === d ? h : s;
+    const p = Lt[f] === a ? e : r;
+    const m = Nt[a] === f ? h : s;
     if (0 < i && 0 < n) u.push({ xsrc: c, ysrc: l, width: p, height: m, xdest: b, ydest: g });
   }
   return u;
@@ -67,11 +72,12 @@ function parsePattern(text) {
   if (!m) throw new Error(`bad pattern ${text}`);
   return { T: +m[1], j: +m[2], Dt: +m[4], body: m[5] };
 }
+/** The viewer's `Ct`: first `T` values (`t`), next `j` (`n`), then the perm. */
 function sections(T, j, body) {
   const values = Array.from({ length: T + j + T * j }, (_, i) => CV[body.charCodeAt(i)]);
   return {
-    colShift: values.slice(0, T),
-    rowShift: values.slice(T, T + j),
+    t: values.slice(0, T),
+    n: values.slice(T, T + j),
     perm: values.slice(T + j),
   };
 }
@@ -103,7 +109,9 @@ for (let ci = 0; ci < tables.ctbl.length; ci++) {
       [2000, 2800],
       [800, 1100],
     ]) {
-      const ref = refTiledRegions(kt, h.colShift, h.rowShift, s.colShift, s.rowShift, coord.T, coord.j, coord.Dt, w, hh);
+      // The bundle assigns `Rt`/`Lt` the *second* run of the body and
+      // `Ft`/`Nt` the first: Rt = s.n, Ft = s.t, Lt = h.n, Nt = h.t.
+      const ref = refTiledRegions(kt, h.n, h.t, s.n, s.t, coord.T, coord.j, coord.Dt, w, hh);
       const got = impl.regions(w, hh);
       compared++;
       if (JSON.stringify(ref) !== JSON.stringify(got)) {
@@ -148,23 +156,84 @@ function tilingProblems(regions, size) {
   return problems;
 }
 
+const tilingScramble = selectScramble('pages/2s5rlNj9.jpg', tables);
+const tilingImpl = compileDescrambler(tilingScramble.coordTable, tilingScramble.pieceTable);
 let tilingChecked = 0;
+const tilingFailures = [];
 for (const size of [
   { width: 1414, height: 1984 },
   { width: 1350, height: 1920 },
   { width: 1195, height: 1673 },
 ]) {
-  const scramble = selectScramble('pages/2s5rlNj9.jpg', tables);
-  const impl = compileDescrambler(scramble.coordTable, scramble.pieceTable);
-  const regions = impl.regions(size.width, size.height);
-  const visible = impl.displaySize(size.width, size.height);
+  const regions = tilingImpl.regions(size.width, size.height);
+  const visible = tilingImpl.displaySize(size.width, size.height);
   const problems = tilingProblems(regions, visible);
   if (problems.length) {
-    console.log(`tiling problems for ${size.width}x${size.height}:`, problems.join(', '));
+    tilingFailures.push(`${size.width}x${size.height}: ${problems.join(', ')}`);
   }
   tilingChecked++;
 }
-check('tiling is complete and non-overlapping', tilingChecked, 3);
+check('tiling was exercised', tilingChecked, 3);
+// Assert on the *problems*, not on the loop counter: the previous version of
+// this check compared `tilingChecked` to 3, so it passed no matter what the
+// geometry did.
+check('tiling is complete and non-overlapping', tilingFailures, []);
+
+// --- 2b. a source tile must be as wide as its position stride implies ------
+//
+// Each source rectangle is a stored tile: `width` pixels of content with `Dt`
+// pixels of padding on either side, so within one stored row consecutive
+// `xsrc` values must differ by exactly `width + 2*Dt` (and likewise down a
+// stored column). This ties the span to the same coordinate run that placed
+// the tile. Reading the span from the other run leaves it a pixel out whenever
+// the two runs disagree, which is what produced the visible seams, and this
+// check catches it without needing a reference implementation.
+function strideProblems(regions, T, j, Dt) {
+  const problems = [];
+  const stride = (list, pos, size, label) => {
+    list.sort((p, q) => p[pos] - q[pos]);
+    for (let k = 1; k < list.length; k++) {
+      const want = list[k - 1][size] + 2 * Dt;
+      const got = list[k][pos] - list[k - 1][pos];
+      if (got !== want) problems.push(`${label}[${k}]: stride ${got}, span ${want}`);
+    }
+  };
+  for (let f = 0; f < j; f++) {
+    stride(regions.slice(f * T, f * T + T), 'xsrc', 'width', `row ${f}`);
+  }
+  for (let a = 0; a < T; a++) {
+    const column = [];
+    for (let f = 0; f < j; f++) column.push(regions[f * T + a]);
+    stride(column, 'ysrc', 'height', `col ${a}`);
+  }
+  return problems;
+}
+
+let strideChecked = 0;
+const strideFailures = [];
+for (let ci = 0; ci < tables.ctbl.length; ci++) {
+  for (let pi = 0; pi < tables.ptbl.length; pi++) {
+    const coord = parsePattern(tables.ctbl[ci]);
+    const piece = parsePattern(tables.ptbl[pi]);
+    if (coord.T !== piece.T || coord.j !== piece.j || coord.Dt !== piece.Dt) continue;
+    const impl2 = compileDescrambler(tables.ctbl[ci], tables.ptbl[pi]);
+    for (const [w, hh] of [
+      [1414, 1984],
+      [1106, 1664],
+      [2000, 2800],
+    ]) {
+      const regions = impl2.regions(w, hh);
+      if (regions.length !== coord.T * coord.j) continue;
+      const problems = strideProblems(regions, coord.T, coord.j, coord.Dt);
+      strideChecked++;
+      if (problems.length && strideFailures.length < 3) {
+        strideFailures.push(`ctbl[${ci}]/ptbl[${pi}] ${w}x${hh}: ${problems.slice(0, 2).join('; ')}`);
+      }
+    }
+  }
+}
+check('stored-tile stride was exercised', strideChecked > 0, true);
+check('every stored tile span matches its position stride', strideFailures, []);
 
 // --- 3. size gates ---------------------------------------------------------
 const scramble = selectScramble('pages/2s5rlNj9.jpg', tables);

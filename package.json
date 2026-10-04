@@ -1,22 +1,55 @@
 {
-  "name": "manga-dl",
-  "version": "0.0.2",
-  "private": true,
-  "description": "Browserless headless CLI that downloads volumes from BookWalker, CMOA and ebookjapan, and can hand them to mokuro-bridge for OCR.",
+  "name": "dokuha-cli",
+  "version": "0.0.9",
+  "description": "読破 (dokuha) — browserless CLI that downloads volumes from BookWalker, CMOA, ebookjapan, Kindle and k-manga, and can hand them to mokuro-bridge for OCR.",
+  "keywords": [
+    "manga",
+    "comic",
+    "downloader",
+    "bookwalker",
+    "cmoa",
+    "ebookjapan",
+    "k-manga",
+    "kindle",
+    "mokuro",
+    "ocr"
+  ],
+  "homepage": "https://github.com/GolyBidoof/dokuha-cli#readme",
+  "bugs": {
+    "url": "https://github.com/GolyBidoof/dokuha-cli/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GolyBidoof/dokuha-cli.git"
+  },
   "license": "MIT",
-  "repository": "https://github.com/GolyBidoof/bookwalker-ebookjapan-cmoa-native-headless-cli",
+  "author": "GolyBidoof",
+  "contributors": [
+    "DeepSeek V4.1 Flash"
+  ],
   "type": "module",
   "engines": {
     "node": ">=20"
   },
   "bin": {
-    "manga-dl": "bin/manga-dl.mjs"
+    "dokuha": "bin/dokuha.mjs"
   },
+  "files": [
+    "bin/",
+    "src/",
+    "vendor/",
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md",
+    "dokuha-logo.png"
+  ],
   "scripts": {
     "test": "node tests/run.mjs",
-    "engines:test": "node vendor/cmoa/test/run.mjs"
+    "test:acceptance": "node tests/acceptance.mjs",
+    "engines:test": "node vendor/cmoa/test/run.mjs",
+    "bench:phases": "node scripts/bench-phases.mjs"
   },
   "optionalDependencies": {
-    "sharp": "^0.34.5"
+    "sharp": "^0.35.5"
   }
 }

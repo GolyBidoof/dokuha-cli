@@ -5,7 +5,7 @@
  * test is the guard for a real bug: the worker transferred `data.buffer` out of
  * Node's shared Buffer pool, which both shipped the wrong byte range (the image
  * is a slice of a 64 KiB slab) and detached memory other allocations were still
- * using — surfacing intermittently as `DataCloneError: Cannot transfer object of
+ * using -- surfacing intermittently as `DataCloneError: Cannot transfer object of
  * unsupported type` partway through a volume.
  *
  * It is offline: the checked-in JPEG fixture is rendered with an identity
@@ -50,7 +50,7 @@ function check(label, condition, detail) {
 // quality-92 default and makes the two paths look different when they are not.
 const pool = new RenderPool(3);
 for (const format of ['jpeg', 'original', 'png']) {
-  const inline = renderPage(bytes, tables, { format, quality: 90 });
+  const inline = await renderPage(bytes, tables, { format, quality: 90 });
   const pooled = await pool.render(bytes, tables, { format, quality: 90 });
 
   check(
@@ -76,7 +76,7 @@ for (const format of ['jpeg', 'original', 'png']) {
 const rounds = await Promise.all(
   Array.from({ length: 24 }, () => pool.render(bytes, tables, { format: 'jpeg', quality: 90 })),
 );
-const expected = digest(renderPage(bytes, tables, { format: 'jpeg', quality: 90 }).data);
+const expected = digest((await renderPage(bytes, tables, { format: 'jpeg', quality: 90 })).data);
 check(
   '24 concurrent jobs all return identical bytes',
   rounds.every((r) => digest(r.data) === expected),

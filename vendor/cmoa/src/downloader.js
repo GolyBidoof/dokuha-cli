@@ -185,8 +185,42 @@ export function volumeName(volume, useTitle = false) {
   return base.slice(0, 80).replace(/[. ]+$/, '') || volume.cid;
 }
 
+/**
+ * The page file name.
+ *
+ * `page-0001.jpg`, one-based and always four digits, so a plain name sort is
+ * reading order. It used to be a bare `0001.jpg`, which sorted correctly but did
+ * not match what the other stores write, so a mixed library had no one order.
+ *
+ * `legacyPageFileName` is the bare form, kept only so an existing folder is
+ * recognised and not downloaded a second time.
+ */
 function pageFileName(index, extension) {
+  return `page-${String(index + 1).padStart(4, '0')}.${extension}`;
+}
+
+function legacyPageFileName(index, extension) {
   return `${String(index + 1).padStart(4, '0')}.${extension}`;
+}
+
+/**
+ * Rewrite the folder's modification times into reading order.
+ *
+ * Pages are fetched concurrently and land in completion order, so without this a
+ * reader sorting by date shows the volume scrambled. One second apart, ending at
+ * roughly now, so every stamp stays in the past. Best effort: a timestamp is a
+ * convenience and must never fail a download whose bytes are already written.
+ */
+async function stampPageTimes(outDir, files) {
+  const ordered = files.filter(Boolean);
+  if (ordered.length < 2) return;
+  const base = Date.now() - ordered.length * 1000;
+  for (let i = 0; i < ordered.length; i++) {
+    const seconds = (base + i * 1000) / 1000;
+    try {
+      await fsp.utimes(path.join(outDir, ordered[i]), seconds, seconds);
+    } catch { /* best effort */ }
+  }
 }
 
 /**
@@ -231,21 +265,37 @@ export async function downloadVolume(volume, options) {
 
   const total = limit > 0 ? Math.min(limit, volume.pages.length) : volume.pages.length;
   const pending = [];
+  const onDisk = new Array(total).fill(null);
   for (let i = 0; i < total; i++) {
     let existing = null;
     if (!force) {
       for (const extension of extensionCandidates) {
-        const candidate = path.join(outDir, pageFileName(i, extension));
-        if (fs.existsSync(candidate)) {
-          existing = candidate;
+        // The canonical name first, then the bare one an older version wrote. A
+        // legacy hit is renamed rather than re-fetched, so a folder resumed now
+        // does not end up holding both schemes at once.
+        const canonical = path.join(outDir, pageFileName(i, extension));
+        if (fs.existsSync(canonical)) {
+          existing = canonical;
+          break;
+        }
+        const legacy = path.join(outDir, legacyPageFileName(i, extension));
+        if (fs.existsSync(legacy)) {
+          try {
+            fs.renameSync(legacy, canonical);
+            existing = canonical;
+          } catch {
+            existing = legacy;
+          }
           break;
         }
       }
     }
     if (existing) {
+      onDisk[i] = path.basename(existing);
       onProgress({ index: i, total, skipped: true, file: existing });
       continue;
     }
+    onDisk[i] = pageFileName(i, defaultExtension);
     pending.push({ index: i, file: path.join(outDir, pageFileName(i, defaultExtension)) });
   }
 
@@ -287,8 +337,10 @@ export async function downloadVolume(volume, options) {
         // Retries are forwarded so the caller's budget applies to page fetches
         // too, not only to the metadata calls in openVolume.
         const raw = await volume.fetchPage(page, { quality, retries: options.retries });
+        const fetchedAt = Date.now();
         const tables = volume.tablesFor(page);
         const rendered = await render(raw, tables);
+        const renderedAt = Date.now();
         // `original` may hand back either the CDN bytes or a re-encoded page, so
         // take the final extension from the result rather than assuming.
         const finalFile = job.file.replace(/\.[a-z0-9]+$/i, `.${rendered.extension}`);
@@ -297,6 +349,7 @@ export async function downloadVolume(volume, options) {
         const tmp = `${finalFile}.part`;
         await fsp.writeFile(tmp, rendered.data);
         await fsp.rename(tmp, finalFile);
+        const writtenAt = Date.now();
         completed++;
         bytes += rendered.data.length;
         onProgress({
@@ -306,6 +359,10 @@ export async function downloadVolume(volume, options) {
           file: finalFile,
           bytes: rendered.data.length,
           elapsedMs: Date.now() - started,
+          // The two halves separately, so a caller can tell rendering from waiting.
+          fetchMs: fetchedAt - started,
+          renderMs: renderedAt - fetchedAt,
+          writeMs: writtenAt - renderedAt,
           kind: rendered.kind,
           format: rendered.format,
           descrambled: rendered.changed,
@@ -356,6 +413,10 @@ export async function downloadVolume(volume, options) {
     ...(failures.length ? { failures } : {}),
   };
   await fsp.writeFile(path.join(outDir, 'metadata.json'), `${JSON.stringify(meta, null, 2)}\n`);
+
+  // Only when this run actually wrote pages: a folder that was already complete
+  // is left exactly as it was found.
+  if (completed > total - pending.length) await stampPageTimes(outDir, onDisk);
 
   return {
     total,

@@ -24,7 +24,7 @@
  */
 
 /** Viewer's `PageSpread`. */
-export const PageSpread = { Center: 0, Left: 1, Right: 2 };
+const PageSpread = { Center: 0, Left: 1, Right: 2 };
 
 const TAG_RE = /<(t-pb|t-img|img|a)(\s+([^>]*)|)>/gi;
 

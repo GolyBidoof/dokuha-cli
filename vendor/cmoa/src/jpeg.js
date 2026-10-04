@@ -125,7 +125,6 @@ function decodeHuffman(br, table) {
 /** Accurate separable 1-D IDCT over an 8x8 block of dequantised coefficients. */
 const BLOCK = new Float64Array(64);
 function idct(coeff, out) {
-  // Rows.
   for (let y = 0; y < 8; y++) {
     const base = y * 8;
     for (let x = 0; x < 8; x++) {
@@ -157,6 +156,38 @@ function idct(coeff, out) {
  * Returns `{ width, height, components: [{ id, h, v, plane, stride }] }` with
  * `plane` holding one byte per sample for that component at its own resolution.
  */
+/**
+ * Read a JPEG's dimensions from its frame header, without decoding any pixels.
+ *
+ * `decodeJpeg` already walks these markers before it touches entropy-coded data, so
+ * the dimensions are available for a few microseconds. Callers that only need to know
+ * how big the page is -- and not what is in it -- can stop here instead of paying for
+ * a full decode.
+ */
+export function readJpegSize(bytes) {
+  const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  if (data[0] !== 0xff || data[1] !== 0xd8) throw new Error('not a JPEG');
+
+  let pos = 2;
+  while (pos < data.length - 1) {
+    if (data[pos] !== 0xff) { pos++; continue; }
+    const marker = data[pos + 1];
+    if (marker === 0xff || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd9)) { pos += 2; continue; }
+    const length = (data[pos + 2] << 8) | data[pos + 3];
+    // SOF0-SOF15, except the four that are not frame headers.
+    const isFrame = marker >= 0xc0 && marker <= 0xcf
+      && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+    if (isFrame) {
+      return {
+        height: (data[pos + 5] << 8) | data[pos + 6],
+        width: (data[pos + 7] << 8) | data[pos + 8],
+      };
+    }
+    pos += 2 + length;
+  }
+  throw new Error('JPEG has no frame header');
+}
+
 export function decodeJpeg(bytes) {
   const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   if (data[0] !== 0xff || data[1] !== 0xd8) throw new Error('not a JPEG');
@@ -182,7 +213,6 @@ export function decodeJpeg(bytes) {
     const seg = data.subarray(pos + 2, segEnd);
 
     if (marker === 0xdb) {
-      // DQT
       let p = 0;
       while (p < seg.length) {
         const pq = seg[p] >> 4;
@@ -196,7 +226,6 @@ export function decodeJpeg(bytes) {
         quant.set(tq, table);
       }
     } else if (marker === 0xc4) {
-      // DHT
       let p = 0;
       while (p < seg.length) {
         const tc = seg[p] >> 4;
@@ -212,7 +241,6 @@ export function decodeJpeg(bytes) {
     } else if (marker === 0xdd) {
       restartInterval = (seg[0] << 8) | seg[1];
     } else if (marker === 0xc0 || marker === 0xc1) {
-      // SOF0/SOF1: baseline sequential
       frame = {
         precision: seg[0],
         height: (seg[1] << 8) | seg[2],
@@ -255,7 +283,6 @@ export function decodeJpeg(bytes) {
   const mcusX = Math.ceil(width / mcuW);
   const mcusY = Math.ceil(height / mcuH);
 
-  // Allocate a plane per component, at its own sampling resolution.
   for (const c of frame.components) {
     c.stride = mcusX * c.h * 8;
     c.planeHeight = mcusY * c.v * 8;
@@ -298,7 +325,6 @@ export function decodeJpeg(bytes) {
         for (let by = 0; by < comp.v; by++) {
           for (let bx = 0; bx < comp.h; bx++) {
             coeff.fill(0);
-            // DC
             const t = decodeHuffman(br, sc.dc);
             if (t < 0) throw new Error('corrupt JPEG: bad DC symbol');
             let diff = 0;
@@ -306,7 +332,6 @@ export function decodeJpeg(bytes) {
             if (t > 0 && diff < 1 << (t - 1)) diff -= (1 << t) - 1;
             comp.dcPred += diff;
             coeff[0] = comp.dcPred * q[0];
-            // AC
             let k = 1;
             while (k < 64) {
               const rs = decodeHuffman(br, sc.ac);
@@ -328,7 +353,6 @@ export function decodeJpeg(bytes) {
               k++;
             }
             idct(coeff, block);
-            // Store into the component plane at this block's position.
             const px = (mx * comp.h + bx) * 8;
             const py = (my * comp.v + by) * 8;
             const stride = comp.stride;
@@ -379,9 +403,21 @@ export function decodeJpeg(bytes) {
 export function sampleRgb(image, x, y, out) {
   const components = image.components;
   const Y = components[0];
+  const ySample = Y.plane[y * Y.stride + x];
+
+  // A grayscale page carries a single component and no chroma at all: the luma
+  // plane already is the picture, so every channel takes it. CMOA serves the
+  // interior of a black-and-white volume this way -- the cover is colour and the
+  // rest is not -- and reading `components[1]` without this check made every such
+  // page throw "Cannot read properties of undefined (reading 'h')". A colour
+  // title never notices; a black-and-white one fails on every page but the cover.
+  if (components.length < 3) {
+    out[0] = out[1] = out[2] = ySample;
+    return out;
+  }
+
   const Cb = components[1];
   const Cr = components[2];
-  const ySample = Y.plane[y * Y.stride + x];
   let cbSample;
   let crSample;
   if (image.maxH === 1 && image.maxV === 1 && Cb.h === 1 && Cb.v === 1) {

@@ -24,7 +24,7 @@ const flag = (name, fallback) => {
 };
 const has = (name) => args.includes(`--${name}`);
 
-const cid = flag('cid', '0000249510_jp_0001');
+const cid = flag('cid', '0000249001_jp_0001');
 const pageCount = Number(flag('pages', 64));
 const concurrencyLevels = String(flag('concurrency', '1,4,16,64,128'))
   .split(',')

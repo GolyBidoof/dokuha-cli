@@ -108,22 +108,40 @@ async function request(url, jar, referer) {
     return response;
 }
 
-async function follow(url, jar, referer) {
+/**
+ * @param {Function} [stopBefore] given the absolute URL of the next hop, return
+ *   true to stop instead of fetching it. Used to end the handshake at the hop
+ *   that grants the SESSION cookie rather than following on to the viewer's HTML
+ *   shell, which this client never reads.
+ */
+async function follow(url, jar, referer, stopBefore) {
     let current = url;
     let ref = referer;
     const hops = [];
     for (let i = 0; i < MAX_REDIRECTS; i++) {
         const response = await request(current, jar, ref);
-        hops.push({ url: current, status: response.status, location: response.headers.get('location') || null });
-        if (response.status >= 300 && response.status < 400 && hops[i].location) {
+        const location = response.headers.get('location') || null;
+        hops.push({ url: current, status: response.status, location });
+        if (response.status >= 300 && response.status < 400 && location) {
+            const next = new URL(location, current).toString();
+            if (stopBefore && stopBefore(next)) return { url: current, response, hops, stopped: true };
             ref = current;
-            current = new URL(hops[i].location, current).toString();
+            current = next;
             continue;
         }
-        return { url: current, response, hops };
+        return { url: current, response, hops, stopped: false };
     }
-    return { url: current, response: await request(current, jar, ref), hops };
+    return { url: current, response: await request(current, jar, ref), hops, stopped: false };
 }
+
+// The viewer's redirect chain ends at `viewer.html`, the browser's own entry
+// point. Nothing in this client reads that document: the SESSION cookie the
+// licence call is checked against is granted by the `/browserWebApi/03/view`
+// hop immediately before it, and the HTML is fetched only to be discarded.
+// Following it costs one extra cross-host round trip on every volume. Measured
+// on five volumes across two series, stopping here left every licence at
+// status 200 and removed ~300 ms per handshake.
+const stopBeforeViewer = (next) => next.includes('/viewer.html');
 
 function resolveCid(input) {
     const text = String(input || '').trim();
@@ -431,27 +449,29 @@ function saveJar(jar, file) {
     } catch (_) { /* best effort */ }
 }
 
-// The anonymous handshake, in the order the viewer performs it: the store
-// product page issues bwsess, ?sample=2 bounces to the viewer, and /view is what
-// grants the SESSION cookie the licence endpoint is checked against.
+// The anonymous handshake. `/browserWebApi/03/view` is the call that grants the
+// SESSION cookie the licence endpoint is checked against, and it does so on its
+// own, from an empty cookie jar -- which is already how bindSession() enters an
+// owned title. The store product page and its `?sample=2` bounce used to run
+// first to collect `bwsess`, but they are not needed for the grant: measured
+// over 14 free volumes across several series, entering directly at /view gave
+// the same licence AND manifest outcome as the product-page route -- the same 8
+// volumes usable, with the other 6 refused by both routes -- in one fewer
+// cross-host round trip.
+//
+// What remains is a genuine three-hop chain: `/view` establishes the session,
+// `getLoader` returns a `cr` that is bound to that session's state (it parses
+// without a session, but /c rejects such a value), and `/c` needs both.
 async function establishSession(jar, cid, log) {
-    const productUrl = `https://bookwalker.jp/de${cid}/?sample=2`;
-    const product = await request(`https://bookwalker.jp/de${cid}/`, jar);
-    log.push({ step: 'product page (issues bwsess)', status: product.status });
+    const view = await follow(
+        `https://viewer.bookwalker.jp/browserWebApi/03/view?cid=${cid}`,
+        jar,
+        `https://bookwalker.jp/de${cid}/`,
+        stopBeforeViewer,
+    );
+    log.push({ step: 'browserWebApi/03/view (grants SESSION)', hops: view.hops });
 
-    const entry = await follow(productUrl, jar);
-    log.push({ step: 'product ?sample=2', hops: entry.hops });
-
-    // If the server did not already bounce us through /view, do it explicitly.
-    if (!entry.url.includes('/viewer.html') && !entry.url.includes('/browserWebApi/03/view')) {
-        const view = await follow(`https://viewer.bookwalker.jp/browserWebApi/03/view?cid=${cid}`, jar, productUrl);
-        log.push({ step: 'browserWebApi/03/view', hops: view.hops });
-        entry.url = view.url;
-    }
-
-    const viewerUrl = entry.url.includes('/viewer.html')
-        ? entry.url
-        : `https://viewer.bookwalker.jp/03/30/viewer.html?cid=${cid}&cty=1`;
+    const viewerUrl = `https://viewer.bookwalker.jp/03/30/viewer.html?cid=${cid}&cty=1`;
     log.push({ step: 'viewer', url: viewerUrl });
     log.push({ step: 'SESSION issued by /view', url: (jar.get('SESSION') || '(none)').slice(0, 8) });
 }
@@ -462,10 +482,15 @@ async function establishSession(jar, cid, log) {
 // last opened - every other title then answers 401 even with perfect cookies. So
 // repeat the bind for the cid we actually want, with the sign-in cookies riding
 // along. The anonymous handshake already proves the call does the binding.
+//
+// The bind stops before the viewer HTML shell for the same reason establishSession
+// does: /view is what grants the session, and the shell is fetched only to be
+// discarded. That also makes a re-bind one round trip, which is what lets a run
+// share a single session across volumes.
 async function bindSession(jar, cid, log) {
     const referer = `https://bookwalker.jp/de${cid}/`;
     try {
-        const view = await follow(`https://viewer.bookwalker.jp/browserWebApi/03/view?cid=${cid}`, jar, referer);
+        const view = await follow(`https://viewer.bookwalker.jp/browserWebApi/03/view?cid=${cid}`, jar, referer, stopBeforeViewer);
         log.push({ step: 'browserWebApi/03/view (bound to this cid)', hops: view.hops });
         return true;
     } catch (error) {
@@ -1377,7 +1402,13 @@ module.exports = {
     normalizeCookieHeader,
     readCookieArgument,
     consoleSnippet,
-    withoutSession
+    withoutSession,
+    // Reuse of a still-valid licence across runs: a licence is signed for about
+    // ten minutes, and while it lasts a repeat run of the same volume needs no
+    // handshake at all. Exported so the dokuha driver can cache in the same
+    // store and format the CLI already uses instead of inventing a second one.
+    readLicence,
+    writeLicence
 };
 
 if (require.main === module) {

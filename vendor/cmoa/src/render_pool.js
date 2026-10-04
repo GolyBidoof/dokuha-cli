@@ -29,13 +29,18 @@ class WorkerSlot {
     this.index = index;
     this.onFree = onFree;
     this.job = null;
+    this.dead = false;
     this.worker = new Worker(fileURLToPath(WORKER_URL));
     this.worker.unref();
     this.worker.on('message', (message) => this.settle(null, message));
     this.worker.on('error', (error) => this.settle(error, null));
+    this.worker.on('exit', (code) => {
+      if (this.job) this.settle(new Error(`render worker exited with code ${code}`), null);
+    });
   }
 
   settle(error, message) {
+    if (this.dead && !this.job) return;
     const job = this.job;
     this.job = null;
     if (job) {
@@ -43,7 +48,8 @@ class WorkerSlot {
       else if (message?.error) job.reject(new Error(message.error));
       else job.resolve(message.result);
     }
-    this.onFree(this);
+    if (error) this.retire();
+    else this.onFree(this);
   }
 
   get busy() {
@@ -64,7 +70,14 @@ class WorkerSlot {
     });
   }
 
+  retire() {
+    if (this.dead) return;
+    this.dead = true;
+    this.onFree(this);
+  }
+
   async close() {
+    this.dead = true;
     await this.worker.terminate();
   }
 }
@@ -84,10 +97,16 @@ export class RenderPool {
 
   /** Workers start lazily, so a run that needs no rendering pays nothing. */
   ensureStarted() {
-    if (this.slots.length) return;
-    for (let i = 0; i < this.size; i++) {
-      this.slots.push(new WorkerSlot(i, (slot) => this.dispatch(slot)));
+    while (this.slots.length < this.size) {
+      const index = this.slots.length;
+      this.slots.push(new WorkerSlot(index, (slot) => this.onSlotFree(slot)));
     }
+  }
+
+  /** A crashed worker is dropped, and the next dispatch brings a fresh one. */
+  onSlotFree(slot) {
+    if (slot.dead) this.slots = this.slots.filter((entry) => entry !== slot);
+    this.dispatch();
   }
 
   render(bytes, tables, options = {}) {
@@ -111,15 +130,10 @@ export class RenderPool {
   }
 
   /** Give queued jobs to idle workers. Called on submit and on every completion. */
-  dispatch(slot = null) {
-    if (slot) {
-      if (!this.queue.length) return;
-      slot.submit(this.queue.shift());
-      return;
-    }
+  dispatch() {
     for (const s of this.slots) {
       if (!this.queue.length) return;
-      if (!s.busy) s.submit(this.queue.shift());
+      if (!s.busy && !s.dead) s.submit(this.queue.shift());
     }
   }
 

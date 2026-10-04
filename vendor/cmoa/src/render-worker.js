@@ -8,9 +8,9 @@
 import { parentPort } from 'node:worker_threads';
 import { renderPage } from './codec.js';
 
-parentPort.on('message', (message) => {
+parentPort.on('message', async (message) => {
   try {
-    const rendered = renderPage(message.bytes, message, {
+    const rendered = await renderPage(message.bytes, message, {
       format: message.format,
       quality: message.quality,
       subsample: message.subsample,
@@ -43,7 +43,6 @@ parentPort.on('message', (message) => {
           data: exact,
         },
       },
-      // The transfer list takes the ArrayBuffer; `exact` is the view onto it.
       [exact.buffer],
     );
   } catch (error) {

@@ -36,8 +36,8 @@ import http from 'node:http';
 import { spawnSync } from 'node:child_process';
 import https, { Agent as HttpsAgent } from 'node:https';
 import { collectPages } from './page-list.mjs';
-import { BridgeClient, discoverBridge, resolveDestination, describeDestinations } from './bridge.mjs';
-import { Progress, humanBytes, humanTime } from './progress.mjs';
+import { BridgeClient, discoverBridge, resolveDestination } from './bridge.mjs';
+import { Progress, humanTime } from './progress.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -72,7 +72,7 @@ function findTargets() {
   return argv.filter((a, i) => !consumed.has(i) && !a.startsWith('--'));
 }
 
-// NOTE: no process.exit at module scope — importing this file for fetchWithRetry
+// NOTE: no process.exit at module scope -- importing this file for fetchWithRetry
 // must not terminate the importer.
 const CONCURRENCY = Math.max(1, Math.min(256, Number(opt('--concurrency', 48)) || 48));
 const RETRIES     = Math.max(0, Number(opt('--retries', 4)) || 0);
@@ -155,7 +155,6 @@ export async function fetchWithRetry(url, attempts) {
     try {
       res = await httpsGet(url);
     } catch (e) {
-      // transport-level failure: worth retrying
       lastErr = e;
       if (a >= attempts) break;
       await sleep(Math.min(8000, 200 * 2 ** a) * (0.5 + Math.random()));
@@ -340,7 +339,6 @@ async function runOne(target) {
       throw new Error('no mokuro-bridge found on ' + (BRIDGE_URL || 'the default ports') +
                       '; start it or pass --bridge URL');
     }
-    // discoverBridge returns { baseUrl, health }; wrap it in a real client.
     bridge = new BridgeClient(found.baseUrl);
     if (!QUIET && !AS_JSON) progress?.update(volLabel, { storage: `bridge ${found.baseUrl}` });
     // Where should the bridge put the result? local / mega / drive / onedrive /
@@ -356,7 +354,7 @@ async function runOne(target) {
 
     // The bridge stages remote uploads in `<vol_dir>/_mega_upload` but never
     // removes it, and its own ingest validation rejects any image in a
-    // subdirectory — so a leftover staging dir from an earlier failed run makes
+    // subdirectory -- so a leftover staging dir from an earlier failed run makes
     // *every* later finalize fail with "nested images are not supported". Clear
     // it while the session is provably idle. The check is on the volume, so a
     // later --dest local run is broken by it too: always clear it.
@@ -543,8 +541,13 @@ async function runOne(target) {
 
     progress?.update(volLabel, { state: 'uploading', uploadDone: 0, uploadFailed: 0 });
     let up = 0, upFailed = 0, upSkipped = 0;
-    // Paced pushes: small concurrency + a floor between request starts, with
-    // retry/backoff inside the client (see COOLDOWN in bridge.mjs).
+    // Paced pushes: small batches of concurrent `pushPage` calls, with
+    // retry/backoff inside the client (see COOLDOWN in bridge.mjs). There is
+    // deliberately no floor between request starts: the global start-rate gate
+    // was removed because it serialised the whole upload phase, and upload
+    // pressure is bounded by this concurrency, the bridge's own admission
+    // semaphore, and the 429/5xx backoff instead. See the VENDORED DEVIATION
+    // note on COOLDOWN in bridge.mjs before re-adding a per-request floor.
     const PUSH_CONC = Math.max(1, Number(opt('--push-concurrency', 4)) || 4);
     for (let i = 0; i < wanted.length; i += PUSH_CONC) {
       const batch = wanted.slice(i, i + PUSH_CONC);
@@ -554,7 +557,6 @@ async function runOne(target) {
           up++;
         } catch (e) {
           if (e.alreadyOcr) {
-            // The bridge already has this page; nothing to upload or re-OCR.
             upSkipped++;
           } else {
             upFailed++;

@@ -5,12 +5,12 @@
  * single line, finished ones collapse into one summary line, and a totals
  * footer aggregates every volume. The whole block is rewritten in place by
  * moving the cursor up over the previous block, so the console is never
- * flooded — one redraw per ~80 ms, not one line per event.
+ * flooded -- one redraw per ~80 ms, not one line per event.
  *
  *   ebj download + mokuro · 12 volumes            01:23  3 done
- *   ▶ 賭ケグルイ （1）【無料お試し版】   [####------]  44%  118/249 · OCR 96/118 · 40 MiB
- *   ▶ 賭ケグルイ （2）【無料お試し版】   [########--]  78%  231/280 · 71 MiB
- *   ✓ 賭ケグルイ （3）【無料お試し版】   249p · OCR 249 · MEGA
+ *   ▶ サンプル作品 （1）【無料お試し版】   [####------]  44%  118/249 · OCR 96/118 · 40 MiB
+ *   ▶ サンプル作品 （2）【無料お試し版】   [########--]  78%  231/280 · 71 MiB
+ *   ✓ サンプル作品 （3）【無料お試し版】   249p · OCR 249 · MEGA
  *   ────────────────────────────────────────────────────────────
  *   3 volumes · 998/1057 pages · 250 MiB · OCR 470 · 1 failed · 82 MiB/s
  *

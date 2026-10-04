@@ -1,10 +1,4 @@
 #!/usr/bin/env node
-/**
- * manga-dl entry point.
- *
- * Kept deliberately thin: parse, dispatch, set an exit code. All the behaviour
- * lives in `src/` so it can be imported and tested.
- */
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -24,10 +18,9 @@ async function main() {
         ({ config, positionals } = parseOptions(process.argv.slice(2)));
     } catch (error) {
         if (error instanceof OptionError) {
-            // A bad flag is a usage problem, so it goes to stderr with the hint
-            // and exits 2 rather than looking like a download failure.
+
             process.stderr.write(`${error.message}\n\n`);
-            process.stderr.write(`Run 'manga-dl --help' for the full list of options.\n`);
+            process.stderr.write(`Run 'dokuha --help' for the full list of options.\n`);
             return 2;
         }
         throw error;
@@ -50,8 +43,7 @@ async function main() {
     }
 
     const { code, summary } = await run(positionals, config);
-    // A summary that exists but failed is a download failure, distinct from a
-    // usage error, so the two get different codes.
+
     if (code !== 0) return code;
     return summary && summary.failed ? 1 : 0;
 }

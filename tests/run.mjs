@@ -17,7 +17,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FILTER = process.argv[2] || '';
 const PER_FILE_TIMEOUT_MS = 120_000;
 
-/** Tests that require the network, opt in with MANGA_DL_TEST_NETWORK=1. */
+/** Tests that require the network, opt in with DOKUHA_TEST_NETWORK=1. */
 const NETWORK_TESTS = new Set(['test_network.mjs']);
 
 function testFiles() {
@@ -59,7 +59,7 @@ function runFile(file) {
     });
 }
 
-const networkEnabled = process.env.MANGA_DL_TEST_NETWORK === '1';
+const networkEnabled = process.env.DOKUHA_TEST_NETWORK === '1';
 const files = testFiles();
 let failed = 0;
 let skipped = 0;
@@ -67,7 +67,7 @@ let skipped = 0;
 for (const file of files) {
     if (NETWORK_TESTS.has(file) && !networkEnabled) {
         skipped++;
-        process.stdout.write(`SKIP  ${file}  (set MANGA_DL_TEST_NETWORK=1 to run)\n`);
+        process.stdout.write(`SKIP  ${file}  (set DOKUHA_TEST_NETWORK=1 to run)\n`);
         continue;
     }
     const result = await runFile(file);

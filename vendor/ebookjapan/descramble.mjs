@@ -33,7 +33,6 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import os from 'node:os';
 import { spawnSync, execFileSync } from 'node:child_process';
 
 const argv = process.argv.slice(2);
@@ -62,7 +61,7 @@ const REPORT = typeof opt('--report', null) === 'string' ? opt('--report') : pat
 // ---------------------------------------------------------------- table load
 function loadTable(p) {
   const t = JSON.parse(fs.readFileSync(p, 'utf8'));
-  const geo = t.geometry || t;                       // both shapes exist
+  const geo = t.geometry || t;
   const grid = geo.grid, tile = geo.tile, cell = geo.cell;
   return {
     raw: t,

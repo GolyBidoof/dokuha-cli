@@ -9,6 +9,13 @@ out/
 *.zip
 *.cbz
 
+# ebookjapan's viewer WebAssembly and its glue chunks. These are the store's own
+# proprietary build artefacts: they are fetched at runtime into
+# ~/.bwdd-cli/ebookjapan-assets/ and must never be committed, because
+# redistributing them is not this project's to do. See vendor/README.md.
+vendor/ebookjapan/*.wasm
+vendor/ebookjapan/D*.js
+
 # Captures and diagnostics
 *.har
 *.log
@@ -16,8 +23,14 @@ out/
 # Session and licence material
 .bwdd-cli/
 .bw-session.json
+kindle-session.json
 free-session.json
 licence-*.json
+
+# Audit and benchmark scratch
+AUDIT.md
+*.png~
+bench/
 
 # OS
 .DS_Store

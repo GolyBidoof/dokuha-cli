@@ -24,8 +24,8 @@ const idx = [0, 0];
 }
 const tables = { coordTable: ctx.ctbl[idx[1]], pieceTable: ctx.ptbl[idx[0]] };
 
-const scrambled = renderPage(page, { coordTable: '', pieceTable: '' }, { format: 'png' });
-const out = renderPage(page, tables, { format: 'png' });
+const scrambled = await renderPage(page, { coordTable: '', pieceTable: '' }, { format: 'png' });
+const out = await renderPage(page, tables, { format: 'png' });
 console.log(`descrambler kind=${out.kind} visible=${out.width}x${out.height} ` +
   `(stored ${scrambled.width}x${scrambled.height})`);
 

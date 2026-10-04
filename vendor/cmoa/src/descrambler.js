@@ -16,10 +16,17 @@
  *              pixels and the body is a compact base64 encoding.
  *
  * "C" counts across and "R" counts down. The body of the tiled form carries
- * three base64 sections: C per-column shift amounts, R per-row shift amounts,
- * and C*R permutation entries. Exactly one column and one row carry the
- * leftover pixels, and `Lt`/`Nt`/`Rt`/`Ft` below record which, which is why
- * tile sizes in `regions()` differ by one pixel.
+ * three base64 sections: the first C values, the next R values, and C*R
+ * permutation entries. Exactly one column and one row carry the leftover
+ * pixels, and `Lt`/`Nt`/`Rt`/`Ft` below record which, which is why tile sizes
+ * in `regions()` differ by one pixel.
+ *
+ * The two numeric sections are *not* "the C columns, then the R rows" under
+ * the viewer's own names: `Ct` returns them as `{t: <first C>, n: <next R>}`
+ * and the viewer then assigns `this.Rt = s.n, this.Ft = s.t, this.Lt = h.n,
+ * this.Nt = h.t`. So `Rt`/`Lt` are the *second* (R-entry) run and `Ft`/`Nt`
+ * the *first* (C-entry) run, and `Rt`/`Lt` are indexed by a row while
+ * `Ft`/`Nt` are indexed by a column.
  *
  * These are ports of the three classes the viewer instantiates in
  * `core/js/speedbinb.js` (minified as `u`, `a` and `f`). Variable names in the
@@ -92,11 +99,14 @@ class UnsupportedNumericLayout extends Error {
  *   T   tiles across
  *   j   tiles down
  *   Dt  padding, in stored-image pixels, around every stored tile
- *   kt  display tile -> stored tile (the composed permutation)
- *   Lt  which stored column carries the width remainder
- *   Nt  which stored row carries the height remainder
- *   Rt  which display column carries the width remainder
- *   Ft  which display row carries the height remainder
+ *   kt  stored tile -> display tile (the composed permutation)
+ *   Lt  per stored row, which stored column carries the width remainder
+ *   Nt  per stored column, which stored row carries the height remainder
+ *   Rt  per display row, which display column carries the width remainder
+ *   Ft  per display column, which display row carries the height remainder
+ *
+ * `Lt`/`Rt` are the body's second section (length j) and `Nt`/`Ft` its first
+ * (length T); see the note at the top of this file.
  */
 class TiledDescrambler {
   constructor(coordTable, pieceTable) {
@@ -104,16 +114,16 @@ class TiledDescrambler {
     const piece = parseTiledPattern(pieceTable);
     if (!coord || !piece) throw new Error('invalid tiled scramble pattern');
     const consistent =
-      coord.rows === piece.rows &&
-      coord.cols === piece.cols &&
+      coord.across === piece.across &&
+      coord.down === piece.down &&
       coord.padding === piece.padding &&
       coord.sign === '+' &&
       piece.sign === '-';
     if (!consistent) throw new Error('tiled scramble patterns disagree');
 
     this.kind = 'tiled';
-    this.T = coord.rows; // tiles across
-    this.j = coord.cols; // tiles down
+    this.T = coord.across; // the viewer's `T`: tiles across
+    this.j = coord.down; // the viewer's `j`: tiles down
     this.Dt = coord.padding;
     if (this.T > 8 || this.j > 8 || this.T * this.j > 64) {
       throw new Error('tiled scramble pattern too large');
@@ -125,11 +135,15 @@ class TiledDescrambler {
 
     const s = section(this.T, this.j, coord.body);
     const h = section(this.T, this.j, piece.body);
-    this.Rt = s.colShift;
-    this.Ft = s.rowShift;
-    this.Lt = h.colShift;
-    this.Nt = h.rowShift;
-    // `kt[display] = storedTileIndex(displayTileIndex)`.
+    // `Ct` hands back `{t, n, p}` = (first run, second run, permutation) and the
+    // viewer assigns `Rt`/`Lt` the *second* run and `Ft`/`Nt` the first. Taking
+    // them in body order instead shifts every source tile by a pixel as soon as
+    // the two runs disagree, which is almost always.
+    this.Rt = s.second;
+    this.Ft = s.first;
+    this.Lt = h.second;
+    this.Nt = h.first;
+    // `kt[storedTileIndex] = displayTileIndex`.
     this.kt = [];
     for (let i = 0; i < this.T * this.j; i++) this.kt.push(s.perm[h.perm[i]]);
   }
@@ -176,10 +190,12 @@ class TiledDescrambler {
       const d = Math.floor(this.kt[o] / this.T);
       const ws = v * r + (this.Rt[d] < v ? e - r : 0);
       const hs = d * s + (this.Ft[v] < d ? h - s : 0);
-      // Tile spans come from the *display* grid (the `Rt`/`Ft` lookups), not
-      // the stored grid: the viewer copies a whole display cell.
-      const w = this.Rt[d] === v ? e : r;
-      const m = this.Ft[v] === d ? h : s;
+      // A source tile is as wide/tall as the *stored* grid says -- the same grid
+      // that placed `c`/`l` above -- and the viewer copies exactly the pixels the
+      // stored tile holds. Sizing it from the display grid (`Rt`/`Ft`) instead
+      // mismatches the position stride by a pixel on the remainder row/column.
+      const w = this.Lt[f] === a ? e : r;
+      const m = this.Nt[a] === f ? h : s;
       if (i > 0 && n > 0) {
         out.push({
           xsrc: c,
@@ -195,7 +211,13 @@ class TiledDescrambler {
   }
 }
 
-/** Split a tiled body into its three base64 sections. */
+/**
+ * Split a tiled body into its three base64 sections, in the order the viewer's
+ * `Ct` reads them and under `Ct`'s own names: first `T` values (`t`), next `j`
+ * values (`n`), then the `T*j` permutation (`p`). Do not read the two numeric
+ * runs as "columns then rows" -- `TiledDescrambler` documents how they are
+ * assigned to `Rt`/`Lt`/`Ft`/`Nt`.
+ */
 function section(T, j, body) {
   const values = [];
   for (let i = 0; i < T + j + T * j; i++) {
@@ -203,8 +225,8 @@ function section(T, j, body) {
     values.push(value < 0 ? 0 : value);
   }
   return {
-    colShift: values.slice(0, T),
-    rowShift: values.slice(T, T + j),
+    first: values.slice(0, T),
+    second: values.slice(T, T + j),
     perm: values.slice(T + j),
   };
 }

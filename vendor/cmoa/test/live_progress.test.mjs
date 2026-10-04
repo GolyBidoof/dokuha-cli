@@ -4,7 +4,7 @@
  * The display is the one part of this project that cannot be verified by looking
  * at return values, and it broke in a way that was easy to miss but very visible:
  * lines wider than the terminal wrapped, the cursor-up count no longer matched the
- * rows drawn, and the redraw painted over itself — a screenful of repeated headers
+ * rows drawn, and the redraw painted over itself -- a screenful of repeated headers
  * and half-overwritten lines.
  *
  * So this test renders frames into a small ANSI terminal emulator and asserts on
@@ -15,7 +15,8 @@
  */
 // The display moved into the CLI's src/ as part of the vendoring: it is pure
 // presentation and no engine module depends on it.
-import { LiveProgress, displayWidth } from '../../../src/display.js';
+import { LiveProgress } from '../../../src/live-progress.js';
+import { displayWidth } from '../../../src/ansi.js';
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
@@ -108,9 +109,9 @@ function check(label, condition, detail) {
   }
 }
 
-// A full-width Japanese title, which is what overflowed before: 20 of these
-// characters occupy 40 columns, but `padEnd` counts them as 20.
-const WIDE = '無料・試し読みページ スーパーの裏でヤニ吸うふたり 1巻（ビッグガンガンコミックス） ｜ 地主 ｜ 漫画';
+// A full-width Japanese title, which is what overflowed before: every one of
+// these characters occupies 2 columns, but `padEnd` counts them as 1.
+const WIDE = '無料・試し読みページ サンプル作品 1巻（テストコミックス） ｜ サンプル作者 ｜ 漫画';
 
 for (const width of [60, 80, 120]) {
   const chunks = [];
@@ -118,8 +119,8 @@ for (const width of [60, 80, 120]) {
   const progress = new LiveProgress({ stream });
 
   progress.add('a', { tag: 'CMOA', label: WIDE });
-  progress.add('b', { tag: 'BW', label: 'さんかく窓の外側は夜 1' });
-  progress.add('c', { tag: 'EBJ', label: '/books/126344/A000065415/' });
+  progress.add('b', { tag: 'BW', label: 'サンプル作品 1' });
+  progress.add('c', { tag: 'EBJ', label: '/books/126001/A009000001/' });
   progress.draw(true);
 
   // Walk the same phases a real run does, forcing a paint each time.
@@ -305,16 +306,32 @@ for (const width of [60, 80, 120]) {
   check('page total cannot read as complete mid-run', !/429\/429 pages/.test(foot), foot);
   check('footer has a progress bar', /[█░]{10,}/.test(lines[0]), lines[0]);
 
-  // A volume that merely uploaded pages is not finished work, so the overall bar
-  // must not count it. Three of four volumes are still running here.
+  // The bar tracks pages that have been fetched, not volumes that have finished.
+  // It used to count only completed volumes, so on a long batch it sat still and
+  // then jumped; 305 of the 429 pages this run knows about are on disk, and 71% is
+  // the honest figure for that. A volume that has merely uploaded its pages is
+  // still progress.
   const percent = Number((lines[0].match(/(\d+)%/) || [])[1] ?? 0);
-  check('overall bar does not count unfinished volumes', percent === 0, `${percent}%`);
+  check('overall bar tracks fetched pages rather than finished volumes', percent === 71, `${percent}%`);
+  // It still may not read as complete while volumes are unopened.
+  check('overall bar cannot read as complete mid-run', percent < 100, `${percent}%`);
 
-  // Once a volume finishes, its pages count toward completion.
+  // The bar moves when pages land, not when a volume is marked done. `b` is
+  // finished here without its remaining pages ever having been fetched, so the bar
+  // must not move: doing so would report work that has not happened.
   progress.finish('b');
-  const after = progress.footer().map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
-  const afterPercent = Number((after[0].match(/(\d+)%/) || [])[1] ?? 0);
-  check('finishing a volume advances the bar', afterPercent > percent, `${percent}% -> ${afterPercent}%`);
+  const afterMarked = Number(
+    ((progress.footer()[0] || '').match(/(\d+)%/) || [])[1] ?? 0,
+  );
+  check('marking a volume done does not invent fetched pages', afterMarked === percent,
+    `${percent}% -> ${afterMarked}%`);
+
+  // Fetching them does move it, all the way to the total.
+  progress.update('b', { done: 244 });
+  const afterFetched = Number(
+    ((progress.footer()[0] || '').match(/(\d+)%/) || [])[1] ?? 0,
+  );
+  check('the bar advances as pages land', afterFetched === 100, `${percent}% -> ${afterFetched}%`);
 }
 
 // Terminals report no width over a pipe; the fallback must still be sane.

@@ -21,6 +21,7 @@ const offline = [
   ['protocol', 'protocol.test.mjs'],
   ['descrambler', 'descrambler.test.mjs'],
   ['jpeg decode', 'jpeg.test.mjs'],
+  ['grayscale', 'grayscale.test.mjs'],
   ['jpeg encode', 'jpeg_encode.test.mjs'],
   ['render pool', 'render_pool.test.mjs'],
   ['live progress', 'live_progress.test.mjs'],

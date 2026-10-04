@@ -1,15 +1,6 @@
-/**
- * Command-line options for manga-dl.
- *
- * Every option is declared once, here, and `parseOptions` returns a plain object.
- * Nothing is read from `process.argv` at import time, which matters for two
- * reasons: the parser can be exercised directly in tests, and `main()` can be
- * called more than once in one process.
- */
 
 import { parseArgs } from 'node:util';
 
-/** Positive integer, with a friendly error rather than a silent NaN. */
 function toInt(name, value, { min = 1, fallback = null } = {}) {
     if (value === undefined || value === null || value === '') return fallback;
     const n = Number(value);
@@ -19,7 +10,6 @@ function toInt(name, value, { min = 1, fallback = null } = {}) {
     return n;
 }
 
-/** An error caused by bad user input, as opposed to a failure while downloading. */
 export class OptionError extends Error {
     constructor(message) {
         super(message);
@@ -27,12 +17,15 @@ export class OptionError extends Error {
     }
 }
 
-/** Per-store defaults. Kept in one table so the help text and the parser agree. */
 export const DEFAULTS = {
-    seriesCap: 16,
+    parallelCap: 16,
     cmConcurrency: 12,
     ebConcurrency: 32,
     bwConcurrency: 128,
+
+    kdlConcurrency: 12,
+
+    kmConcurrency: 16,
     pushConcurrency: 4,
     retries: 6,
     cmScanLimit: 60,
@@ -40,11 +33,15 @@ export const DEFAULTS = {
     format: 'original',
 };
 
-/** Declarations, used for both parsing and for rendering the help text. */
 export const OPTIONS = [
-    // Output
+
+    { name: 'series', type: 'boolean', group: 'Selection', help: 'treat every URL as an entry point into its series and download only the volumes that are free in full' },
+    { name: 'download-samplers', type: 'boolean', group: 'Selection', help: "with --series, carry on past the free volumes and take each remaining volume's 試し読み sampler, as far as the series goes" },
+
     { name: 'out', short: 'o', type: 'string', arg: 'DIR', group: 'Output', default: './library', help: 'where volumes are written' },
-    { name: 'title-dir', type: 'boolean', group: 'Output', help: 'name each folder after the volume title instead of the cid' },
+    { name: 'title-dir', type: 'boolean', group: 'Output', help: 'name each folder after the volume title (the default); --no-title-dir names it after the content id instead' },
+    { name: 'no-title-dir', type: 'boolean', group: 'Output', help: 'name each folder after the content id instead of the title' },
+    { name: 'zip', type: 'boolean', group: 'Output', help: 'BookWalker only: collect each volume into one .zip instead of writing its pages' },
     { name: 'flat', type: 'boolean', group: 'Output', help: 'write pages straight into --out' },
     { name: 'dry-run', type: 'boolean', group: 'Output', help: 'list what would be downloaded, then stop' },
     { name: 'force', type: 'boolean', group: 'Output', help: 're-download pages that already exist' },
@@ -53,65 +50,59 @@ export const OPTIONS = [
     { name: 'quiet', type: 'boolean', group: 'Output', help: 'no progress redraws' },
     { name: 'no-progress', type: 'boolean', group: 'Output', help: 'disable the progress block entirely' },
 
-    // Concurrency
-    { name: 'series', type: 'string', arg: 'N', group: 'Concurrency', help: `volumes at once (default: all of them, up to ${DEFAULTS.seriesCap})` },
+    { name: 'parallel', type: 'string', arg: 'N', group: 'Concurrency', help: `volumes at once (default: a quarter of your cores, up to ${DEFAULTS.parallelCap})` },
     { name: 'jobs', type: 'string', arg: 'N', group: 'Concurrency', help: 'render workers across all CMOA volumes (default: cores - 1, divided by the volumes running at once)' },
     { name: 'concurrency', type: 'string', arg: 'N', group: 'Concurrency', help: 'set the per-store page concurrency at once' },
     { name: 'cm-concurrency', type: 'string', arg: 'N', group: 'Concurrency', help: `CMOA pages in flight (default ${DEFAULTS.cmConcurrency})` },
     { name: 'eb-concurrency', type: 'string', arg: 'N', group: 'Concurrency', help: `ebookjapan pages in flight (default ${DEFAULTS.ebConcurrency})` },
     { name: 'bw-concurrency', type: 'string', arg: 'N', group: 'Concurrency', help: `BookWalker pages in flight (default ${DEFAULTS.bwConcurrency})` },
+    { name: 'kdl-concurrency', type: 'string', arg: 'N', group: 'Concurrency', help: `Kindle pages in flight (default ${DEFAULTS.kdlConcurrency})` },
+    { name: 'km-concurrency', type: 'string', arg: 'N', group: 'Concurrency', help: `k-manga requests outstanding on each viewer socket, 1-32 (default ${DEFAULTS.kmConcurrency}); a long volume opens up to 4 sockets, and the store is slower past ~16 per socket, not faster` },
     { name: 'push-concurrency', type: 'string', arg: 'N', group: 'Concurrency', help: `pages pushed to mokuro-bridge at once (default ${DEFAULTS.pushConcurrency})` },
 
-    // CMOA
     { name: 'cm-volume', type: 'string', arg: 'V', group: 'CMOA', default: '1', help: 'volume number, comma list, or "all"; a /vol/<n>/ in the URL overrides it' },
     { name: 'cm-scan-limit', type: 'string', arg: 'N', group: 'CMOA', help: `highest volume to probe with "all" (default ${DEFAULTS.cmScanLimit})` },
-    { name: 'format', type: 'string', arg: 'FMT', group: 'CMOA', help: `page format: original or jpeg (default ${DEFAULTS.format})` },
+    { name: 'format', type: 'string', arg: 'FMT', group: 'CMOA', help: 'page format: original or jpeg for CMOA, jpeg or webp for ebookjapan (default: the store\'s own for CMOA, jpeg for ebookjapan)' },
     { name: 'quality', type: 'string', arg: 'N', group: 'CMOA', help: 'image quality multiplier passed to the CMOA API' },
+    { name: 'jpeg-quality', type: 'string', arg: 'N', group: 'CMOA', help: 'quality of the JPEG CMOA pages are re-encoded at, 1-100 (default 92); lower is faster to write and smaller' },
 
-    // ebookjapan
-    { name: 'descramble', type: 'boolean', group: 'ebookjapan', help: 'keep the descrambled image rather than the original' },
-    { name: 'table', type: 'string', arg: 'FILE', group: 'ebookjapan', help: 'use a specific scramble table' },
-    { name: 'pdf', type: 'string', arg: 'FILE', group: 'ebookjapan', help: 'also write a PDF' },
+    { name: 'descramble', type: 'boolean', group: 'ebookjapan', help: 'require page descrambling (ebookjapan, k-manga); fails if the optional sharp dependency is missing' },
+    { name: 'no-descramble', type: 'boolean', group: 'ebookjapan', help: 'keep the scrambled pages exactly as the CDN serves them (ebookjapan, k-manga)' },
 
-    // BookWalker auth
     { name: 'bw-cookie', type: 'string', arg: 'TEXT', multiple: true, group: 'BookWalker auth', help: 'Cookie header, "Copy as cURL" command, @FILE, a path, or "-" for stdin. Repeatable and merged' },
     { name: 'bw-login', type: 'boolean', group: 'BookWalker auth', help: 'not available: needs a browser. Sign in normally and use --bw-cookie' },
     { name: 'bw-state', type: 'string', arg: 'FILE', group: 'BookWalker auth', help: 'where the saved session lives' },
-    { name: 'no-state', type: 'boolean', group: 'BookWalker auth', help: 'do not read or write a saved session' },
+    { name: 'no-state', type: 'boolean', group: 'BookWalker auth', help: 'do not read or write a saved session, for either account store' },
     { name: 'bw-sample', type: 'boolean', group: 'BookWalker auth', help: 'force the trial route instead of the free one' },
     { name: 'bw-u1', type: 'string', arg: 'UUID', group: 'BookWalker auth', help: 'supply u1 explicitly (HttpOnly, normally inside --bw-cookie)' },
     { name: 'bw-cr', type: 'string', arg: 'N', group: 'BookWalker auth', help: 'send a specific cr instead of reading it from getLoader' },
     { name: 'bw-no-cr', type: 'boolean', group: 'BookWalker auth', help: 'omit cr from the licence request' },
     { name: 'bw-entry', type: 'string', arg: 'URL', group: 'BookWalker auth', help: 'open through this URL instead of choosing a route' },
 
-    // OCR
+    { name: 'kindle-cookie', type: 'string', arg: 'TEXT', multiple: true, group: 'Kindle auth', help: 'read.amazon.co.jp cookies: a Cookie header, "Copy as cURL" command, @FILE, a path, or "-" for stdin. Repeatable and merged' },
+    { name: 'kindle-state', type: 'string', arg: 'FILE', group: 'Kindle auth', help: 'where the saved Kindle session lives (default ~/.bwdd-cli/kindle-session.json)' },
+    { name: 'kindle-max-volumes', type: 'string', arg: 'N', group: 'Kindle auth', help: 'with --series, the most volumes to walk forward through (default 200)' },
+
     { name: 'mokuro', type: 'boolean', group: 'mokuro-bridge (OCR)', help: 'push every volume through the bridge' },
     { name: 'bridge', type: 'string', arg: 'URL', group: 'mokuro-bridge (OCR)', help: 'bridge base URL (default: auto-discover :62642)' },
     { name: 'dest', type: 'string', arg: 'METHOD', group: 'mokuro-bridge (OCR)', help: 'local, mega, drive, ... (default: the bridge owns it)' },
     { name: 'dest-folder', type: 'string', arg: 'DIR', group: 'mokuro-bridge (OCR)', help: 'folder to use when --dest is local' },
     { name: 'local-dir', type: 'string', arg: 'DIR', group: 'mokuro-bridge (OCR)', help: 'alias for --dest local --dest-folder DIR' },
     { name: 'ocr-wait', type: 'string', arg: 'SECONDS', group: 'mokuro-bridge (OCR)', help: `how long to wait for OCR (default ${DEFAULTS.ocrWaitSeconds})` },
+    { name: 'bridge-parallel', type: 'string', arg: 'N', group: 'mokuro-bridge (OCR)', help: 'volumes in the bridge stage at once (default: the same as --parallel)' },
+    { name: 'no-folder-ingest', type: 'boolean', group: 'mokuro-bridge (OCR)', help: 'upload pages one at a time instead of letting a local bridge read the folder' },
     { name: 'retries', type: 'string', arg: 'N', group: 'mokuro-bridge (OCR)', help: `attempts per failed page (default ${DEFAULTS.retries})` },
 
-    // Meta
     { name: 'help', short: 'h', type: 'boolean', group: 'Meta', help: 'show this help' },
     { name: 'version', short: 'V', type: 'boolean', group: 'Meta', help: 'show the version' },
 ];
 
-/**
- * Expand the declaration table into the shape `node:util`'s parseArgs wants.
- *
- * Both the long and short spelling are registered so that parseArgs rejects an
- * unknown flag for us, which keeps the error text consistent with the help.
- */
 export function buildParseConfig() {
     const options = {};
     for (const opt of OPTIONS) {
         options[opt.name] = {
             type: opt.type,
-            // `short` is a property of the option definition, not a comma-joined
-            // key: `'out,o'` is silently treated as a long name and every use of
-            // `--out` then fails as unknown.
+
             ...(opt.short ? { short: opt.short } : {}),
             ...(opt.multiple ? { multiple: true } : {}),
             ...(opt.default !== undefined && !opt.multiple ? { default: opt.default } : {}),
@@ -120,13 +111,6 @@ export function buildParseConfig() {
     return { options, allowPositionals: true, strict: true };
 }
 
-/**
- * Reword a `parseArgs` failure into something that points at the fix.
- *
- * `parseArgs` reports a missing value as "ambiguous" when the next token is
- * another flag, which reads like a contradiction rather than a typo, and it
- * capitalises "Unknown option" inconsistently with the rest of our output.
- */
 function explainParseError(error) {
     const message = String(error.message || '');
 
@@ -145,12 +129,6 @@ function explainParseError(error) {
     return message;
 }
 
-/**
- * Parse argv into a normalised config object.
- *
- * @param {string[]} argv arguments without the node/script prefix
- * @returns {{ config: object, positionals: string[] }}
- */
 export function parseOptions(argv = []) {
     let parsed;
     try {
@@ -166,8 +144,15 @@ export function parseOptions(argv = []) {
         help: Boolean(v.help),
         version: Boolean(v.version),
 
+        series: Boolean(v.series),
+
+        downloadSamplers: Boolean(v['download-samplers']),
+
         out: String(v.out ?? './library'),
-        titleDir: Boolean(v['title-dir']),
+
+        // --title-dir is the default, but saying it explicitly has to work too.
+        titleDir: v['no-title-dir'] ? false : true,
+        zip: Boolean(v.zip),
         flat: Boolean(v.flat),
         dryRun: Boolean(v['dry-run']),
         force: Boolean(v.force),
@@ -176,24 +161,23 @@ export function parseOptions(argv = []) {
         quiet: Boolean(v.quiet),
         noProgress: Boolean(v['no-progress']),
 
-        series: toInt('series', v.series, { fallback: null }),
+        parallel: toInt('parallel', v.parallel, { fallback: null }),
         jobs: toInt('jobs', v.jobs, { fallback: null }),
         cmConcurrency: toInt('cm-concurrency', v['cm-concurrency'], { fallback: perStore ?? DEFAULTS.cmConcurrency }),
         ebConcurrency: toInt('eb-concurrency', v['eb-concurrency'], { fallback: perStore ?? DEFAULTS.ebConcurrency }),
         bwConcurrency: toInt('bw-concurrency', v['bw-concurrency'], { fallback: perStore ?? DEFAULTS.bwConcurrency }),
+        kdlConcurrency: toInt('kdl-concurrency', v['kdl-concurrency'], { fallback: perStore ?? DEFAULTS.kdlConcurrency }),
+        kmConcurrency: toInt('km-concurrency', v['km-concurrency'], { fallback: perStore ?? DEFAULTS.kmConcurrency }),
         pushConcurrency: toInt('push-concurrency', v['push-concurrency'], { fallback: DEFAULTS.pushConcurrency }),
 
         cmVolume: String(v['cm-volume'] ?? '1'),
         cmScanLimit: toInt('cm-scan-limit', v['cm-scan-limit'], { fallback: DEFAULTS.cmScanLimit }),
         format: String(v.format ?? DEFAULTS.format),
         quality: v.quality === undefined ? null : toInt('quality', v.quality),
+        jpegQuality: v['jpeg-quality'] === undefined ? null : toInt('jpeg-quality', v['jpeg-quality']),
 
-        descramble: Boolean(v.descramble),
-        table: v.table ?? null,
-        pdf: v.pdf ?? null,
+        descramble: v.descramble ? true : (v['no-descramble'] ? false : null),
 
-        // Repeated flags arrive as an array already; keep it that way so the
-        // sampler's own reader handles the shapes (header, cURL, @FILE, path, -).
         bwCookies: Array.isArray(v['bw-cookie']) ? v['bw-cookie'] : (v['bw-cookie'] ? [v['bw-cookie']] : []),
         bwLogin: Boolean(v['bw-login']),
         bwState: v['bw-state'] ?? null,
@@ -204,12 +188,19 @@ export function parseOptions(argv = []) {
         bwNoCr: Boolean(v['bw-no-cr']),
         bwEntry: v['bw-entry'] ?? null,
 
+        kindleCookies: Array.isArray(v['kindle-cookie']) ? v['kindle-cookie'] : (v['kindle-cookie'] ? [v['kindle-cookie']] : []),
+        kindleState: v['kindle-state'] ?? null,
+        kindleNoState: Boolean(v['no-state']),
+        kindleMaxVolumes: toInt('kindle-max-volumes', v['kindle-max-volumes'], { fallback: null }),
+
         mokuro: Boolean(v.mokuro),
         bridge: v.bridge ?? null,
         dest: v.dest ?? null,
         destFolder: v['dest-folder'] ?? null,
         localDir: v['local-dir'] ?? null,
         ocrWaitSeconds: toInt('ocr-wait', v['ocr-wait'], { fallback: DEFAULTS.ocrWaitSeconds }),
+        bridgeParallel: toInt('bridge-parallel', v['bridge-parallel'], { min: 1, fallback: null }),
+        folderIngest: v['no-folder-ingest'] ? false : true,
         retries: toInt('retries', v.retries, { min: 0, fallback: DEFAULTS.retries }),
     };
 

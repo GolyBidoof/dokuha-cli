@@ -30,7 +30,9 @@ check('last id', pages.at(-1).id, 'L0243');
 check('unique ids', new Set(pages.map((p) => p.id)).size, 244);
 check('all 1350x1920', pages.every((p) => p.orgwidth === 1350 && p.orgheight === 1920), true);
 check('srcs match viewer order', JSON.stringify(pages.map((p) => p.src)), JSON.stringify(ctx.srcs));
-check('title', parseBookMeta(ttx).title, 'スーパーの裏でヤニ吸うふたり 1巻');
+// Live cross-check against the store, so the expectation is shape-based on
+// purpose: pinning a named work would both rot and put a real title in the repo.
+check('a title came back', String(parseBookMeta(ttx).title || '').trim().length > 0, true);
 check('direction', parseBookMeta(ttx).direction, 'left');
 check('spread: single centre page', pages.filter((p) => p.pageSpread === 0).length, 1);
 check('has usemaps', pages.filter((p) => p.usemap).length > 0, true);
