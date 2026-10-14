@@ -39,13 +39,16 @@ jobs:
       id-token: write # OIDC for Trusted Publishing and provenance
     steps:
       - uses: actions/checkout@v4
+      # Publishing runs on the newest LTS, not the oldest supported version. Trusted
+      # Publishing needs npm 11.5.1 or newer for its OIDC exchange, and npm 12 refuses to
+      # install on Node 20 at all, so the floor cannot host the upload. The oldest
+      # supported version is still exercised by the test workflow.
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           # No registry-url: it makes setup-node write an .npmrc with a placeholder
           # NODE_AUTH_TOKEN, and npm then authenticates with that instead of exchanging
-          # the OIDC token, which answers 404 on the PUT rather than 403. Trusted
-          # Publishing needs the OIDC path left alone.
+          # the OIDC token, which answers 404 on the PUT rather than 403.
 
       # Trusted Publishing exchanges the OIDC token for a short lived credential, and only
       # npm 11.5.1 and newer knows how. Node 20 bundles npm 10, which ignores the token and
