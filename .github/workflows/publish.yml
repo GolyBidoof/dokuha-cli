@@ -58,6 +58,12 @@ jobs:
             exit 1
           fi
 
+      # The suite has to run against installed dependencies. `sharp` is an optional
+      # dependency that several tests require outright, and without this step the run
+      # failed on a missing module while every test that needs no dependency passed,
+      # which read like a Node version problem and was not one.
+      - run: npm install --no-audit --no-fund
+
       - run: npm test
 
       # The tarball is the release. Print what it contains and how big it is on

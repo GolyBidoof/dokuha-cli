@@ -23,7 +23,14 @@ import { check, checkEqual, finish } from './_harness.mjs';
 import { BwNormalizePool, defaultNormalizeWorkers } from '../src/download/bw-normalize-pool.js';
 
 const require = createRequire(import.meta.url);
-const sharp = require('sharp');
+let sharp;
+try {
+    sharp = require('sharp');
+} catch {
+    // sharp is an optional dependency, and this file cannot test the pool without it.
+    process.stdout.write('SKIP  test_bw_normalize_pool.mjs  (optional dependency sharp is not installed)\n');
+    process.exit(0);
+}
 const { normalizePage, crc32 } = require('../vendor/bookwalker/public-trial.js');
 const { A9p } = require('../vendor/bookwalker/bw-crypto.js');
 

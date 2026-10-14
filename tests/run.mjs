@@ -71,7 +71,10 @@ for (const file of files) {
         continue;
     }
     const result = await runFile(file);
-    if (result.ok) {
+    if (result.ok && result.skipped) {
+        skipped++;
+        process.stdout.write(`SKIP  ${file}  (${result.detail})\n`);
+    } else if (result.ok) {
         process.stdout.write(`PASS  ${file}  (${result.detail})\n`);
     } else {
         failed++;
