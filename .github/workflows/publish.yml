@@ -47,6 +47,11 @@ jobs:
           # the OIDC token, which answers 404 on the PUT rather than 403. Trusted
           # Publishing needs the OIDC path left alone.
 
+      # Trusted Publishing exchanges the OIDC token for a short lived credential, and only
+      # npm 11.5.1 and newer knows how. Node 20 bundles npm 10, which ignores the token and
+      # then reports ENEEDAUTH, so the CLI is upgraded before publishing.
+      - run: npm install -g npm@latest
+
       - name: The tag must match package.json
         # A tag that disagrees with the packaged version publishes a release whose
         # tarball claims something else, and npm will not let the number be
