@@ -42,7 +42,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-          registry-url: "https://registry.npmjs.org"
+          # No registry-url: it makes setup-node write an .npmrc with a placeholder
+          # NODE_AUTH_TOKEN, and npm then authenticates with that instead of exchanging
+          # the OIDC token, which answers 404 on the PUT rather than 403. Trusted
+          # Publishing needs the OIDC path left alone.
 
       - name: The tag must match package.json
         # A tag that disagrees with the packaged version publishes a release whose
