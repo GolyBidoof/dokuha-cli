@@ -14,7 +14,7 @@
 
 import { resolveSeries } from '../src/platforms/index.js';
 import { parseOptions } from '../src/options.js';
-import { detectSource } from '../src/detect.js';
+import { detectSource } from '../src/platforms/index.js';
 import {
     dedupeBookwalkerVolumes,
     parseBookwalkerNextPage,

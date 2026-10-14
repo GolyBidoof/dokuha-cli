@@ -41,7 +41,6 @@ import { Progress, humanTime } from './progress.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
-// ---------------------------------------------------------------- arg parsing
 const argv = process.argv.slice(2);
 
 /** Flags that consume the following token as their value. */
@@ -325,7 +324,6 @@ async function runOne(target) {
     file: `page_${String(i).padStart(pad, '0')}.webp`,
   }));
 
-  // ---- progress + optional mokuro bridge -----------------------------------
   const progress = NO_PROGRESS ? null
     : new Progress({ quiet: QUIET || AS_JSON, compact: MULTI_TARGET || SERIES > 1 });
   const volLabel = book.name || book.code;
@@ -376,7 +374,6 @@ async function runOne(target) {
     progress?.update(volLabel, { state: 'uploading' });
   }
 
-  // ---- self-feeding worker pool ------------------------------------------
   let next = 0, done = 0, skipped = 0, stale = 0, failed = 0, bytes = 0, expired = 0;
   const REFRESH_PASSES = 2;
   const t0 = performance.now();
@@ -491,7 +488,6 @@ async function runOne(target) {
   };
   await fsp.writeFile(path.join(folder, 'metadata.json'), JSON.stringify(manifest, null, 2));
 
-  // ---- optional descramble pass -----------------------------------------
   let descramble = null;
   let descrambledDir = null;
   if (DESCRAMBLE) {
@@ -528,7 +524,6 @@ async function runOne(target) {
     else if (r.stderr) descramble.error = r.stderr.trim().split('\n').slice(-3);
   }
 
-  // ---- optional mokuro bridge hand-off ----------------------------------
   let mokuro = null;
   if (MOKURO && bridge && session) {
     // Upload the best available pixels: descrambled if we have them, else raw.

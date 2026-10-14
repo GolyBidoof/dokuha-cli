@@ -127,9 +127,13 @@ import { check, checkEqual, finish } from './_harness.mjs';
     // is the opt-out rather than the default, because a folder called
     // `00000004-0000-4000-8000-000000000004` tells a human nothing.
     checkEqual('title folders are the default', parseOptions([]).config.titleDir, true);
-    checkEqual('--title-dir is still accepted as the default', parseOptions(['--title-dir']).config.titleDir, true);
     checkEqual('--no-title-dir opts back out to the content id',
         parseOptions(['--no-title-dir']).config.titleDir, false);
+    // The positive alias was parsed and never changed anything, so it is gone
+    // rather than kept as a no-op.
+    let titleDirRejected = false;
+    try { parseOptions(['--title-dir']); } catch { titleDirRejected = true; }
+    check('--title-dir is no longer accepted', titleDirRejected);
 
     // BookWalker collects pages into an archive only when asked.
     checkEqual('the archive is off by default', parseOptions([]).config.zip, false);
@@ -165,10 +169,54 @@ import { check, checkEqual, finish } from './_harness.mjs';
     checkEqual('a specific Kindle concurrency wins over the shared one',
         parseOptions(['--concurrency', '6', '--kdl-concurrency', '2']).config.kdlConcurrency, 2);
 
-    checkEqual('the series walk is capped by default',
-        parseOptions([]).config.kindleMaxVolumes, null);
-    checkEqual('--kindle-max-volumes sets the cap',
-        parseOptions(['--kindle-max-volumes', '10']).config.kindleMaxVolumes, 10);
+    // The cap was parsed into a config field nothing ever read, so the flag is
+    // gone; the walk has its own internal bound.
+    let capRejected = false;
+    try { parseOptions(['--kindle-max-volumes', '10']); } catch { capRejected = true; }
+    check('--kindle-max-volumes is no longer accepted', capRejected);
+}
+
+// ---------------------------------------------------------------------------
+// Rejected combinations, documented ranges, and near-miss suggestions
+// ---------------------------------------------------------------------------
+{
+    const rejects = (argv) => {
+        try { parseOptions(argv); return ''; } catch (error) { return error.message; }
+    };
+
+    check('--descramble and --no-descramble together is refused',
+        /cannot both be given/.test(rejects(['--descramble', '--no-descramble'])),
+        rejects(['--descramble', '--no-descramble']));
+
+    check('--jpeg-quality above 100 is refused',
+        /1-100/.test(rejects(['--jpeg-quality', '500'])), rejects(['--jpeg-quality', '500']));
+    check('--jpeg-quality below 1 is refused', /1-100/.test(rejects(['--jpeg-quality', '0'])));
+    checkEqual('--jpeg-quality at the boundary is accepted',
+        parseOptions(['--jpeg-quality', '100']).config.jpegQuality, 100);
+
+    check('--km-concurrency above 32 is refused',
+        /1-32/.test(rejects(['--km-concurrency', '999'])), rejects(['--km-concurrency', '999']));
+    checkEqual('--km-concurrency at the boundary is accepted',
+        parseOptions(['--km-concurrency', '32']).config.kmConcurrency, 32);
+
+    // A typo should point at the flag that was meant, not just echo the mistake.
+    check('a near-miss option suggests the real one',
+        /did you mean --series\?/.test(rejects(['--seres'])), rejects(['--seres']));
+    check('a missing value names the flag',
+        /--out needs a value/.test(rejects(['--out'])), rejects(['--out']));
+
+    // One flag now means "ignore what is already there", locally and at the bridge.
+    checkEqual('--force implies overwrite', parseOptions(['--force']).config.overwrite, true);
+    checkEqual('--overwrite is gone', /unknown option/.test(rejects(['--overwrite'])), true);
+
+    // A cookie file that does not exist is a startup error, not a failure per store.
+    check('a missing @FILE cookie is refused while parsing',
+        /does not exist/.test(rejects(['--bw-cookie', '@/nonexistent/cookies.txt'])),
+        rejects(['--bw-cookie', '@/nonexistent/cookies.txt']));
+    check('an existing @FILE cookie parses',
+        parseOptions(['--bw-cookie', '@tests/test_options.mjs']).config.bwCookies.length === 1);
+    check('an inline cookie is not treated as a file',
+        parseOptions(['--bw-cookie', 'bwmember=x']).config.bwCookies.length === 1);
 }
 
 finish();

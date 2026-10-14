@@ -192,7 +192,6 @@ for (const width of [60, 80, 120]) {
     `width ${width}: no reliance on terminal cursor save/restore`,
     !emitted.includes('\x1b7') && !emitted.includes('\x1b8'),
   );
-  // And a redraw must actually move the cursor up before erasing.
   check(
     `width ${width}: redraws step back up before erasing`,
     /\x1b\[\d+A\x1b\[0J/.test(emitted),
@@ -214,7 +213,6 @@ for (const width of [60, 80, 120]) {
     progress.update(key, { phase: 'downloading', total: 10, done: 10 });
   }
   progress.draw(true);
-  // Finish them all, one at a time, painting between each.
   for (const key of ['a', 'b', 'c']) {
     progress.finish(key);
     progress.draw(true);
@@ -306,32 +304,35 @@ for (const width of [60, 80, 120]) {
   check('page total cannot read as complete mid-run', !/429\/429 pages/.test(foot), foot);
   check('footer has a progress bar', /[█░]{10,}/.test(lines[0]), lines[0]);
 
-  // The bar tracks pages that have been fetched, not volumes that have finished.
-  // It used to count only completed volumes, so on a long batch it sat still and
-  // then jumped; 305 of the 429 pages this run knows about are on disk, and 71% is
-  // the honest figure for that. A volume that has merely uploaded its pages is
-  // still progress.
+  // The overall bar weights the pipeline, not one stage: downloading is worth its
+  // fetched share of 0.3, the handover to the bridge 0.1, OCR 0.45, building the
+  // archive 0.05 and the destination upload 0.1, with a finished volume a whole unit.
+  // Each volume's share of the run is its page count rather than its existence, so a
+  // short volume finishing does not advance the bar as far as a long one. Two of these
+  // four volumes are partly or wholly through their stages, so the bar sits at 21%. It
+  // used to be `fetched/known`, which sat still through upload and OCR; the shared
+  // implementation moved on and this copy follows it. The deviation is recorded in
+  // vendor/README.md.
   const percent = Number((lines[0].match(/(\d+)%/) || [])[1] ?? 0);
-  check('overall bar tracks fetched pages rather than finished volumes', percent === 71, `${percent}%`);
+  check('overall bar weights the pipeline stages', percent === 21, `${percent}%`);
   // It still may not read as complete while volumes are unopened.
   check('overall bar cannot read as complete mid-run', percent < 100, `${percent}%`);
 
-  // The bar moves when pages land, not when a volume is marked done. `b` is
-  // finished here without its remaining pages ever having been fetched, so the bar
-  // must not move: doing so would report work that has not happened.
+  // A finished volume is a whole unit, so completing one moves the bar.
   progress.finish('b');
   const afterMarked = Number(
     ((progress.footer()[0] || '').match(/(\d+)%/) || [])[1] ?? 0,
   );
-  check('marking a volume done does not invent fetched pages', afterMarked === percent,
+  check('a finished volume advances the bar', afterMarked === 70,
     `${percent}% -> ${afterMarked}%`);
 
-  // Fetching them does move it, all the way to the total.
+  // And it never overshoots: further pages on an already-finished volume add nothing.
   progress.update('b', { done: 244 });
   const afterFetched = Number(
     ((progress.footer()[0] || '').match(/(\d+)%/) || [])[1] ?? 0,
   );
-  check('the bar advances as pages land', afterFetched === 100, `${percent}% -> ${afterFetched}%`);
+  check('the bar does not overshoot', afterFetched === afterMarked,
+    `${afterMarked}% -> ${afterFetched}%`);
 }
 
 // Terminals report no width over a pipe; the fallback must still be sane.

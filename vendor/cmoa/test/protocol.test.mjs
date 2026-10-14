@@ -22,7 +22,6 @@ const check = (name, got, want) => {
   checks.push({ name, got, want: typeof want === 'function' ? '(predicate)' : want, ok });
 };
 
-// --- generateK ------------------------------------------------------------
 const fixedRandom = () => {
   let i = 0;
   const values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65];
@@ -37,7 +36,6 @@ check('generateK differs across nonces', generateK(FIXTURE.cid) !== generateK(FI
 check('generateK handles a cid shorter than 16 bytes', generateK('abc').length, 32);
 check('B64 alphabet', B64.length, 64);
 
-// --- decodeTable ----------------------------------------------------------
 check(
   'decodeTable rejects a non-string',
   (() => {
@@ -79,7 +77,6 @@ const wrong = (() => {
 })();
 check('wrong key fails to parse', wrong, 'throws');
 
-// --- selectScramble -------------------------------------------------------
 const expectFirst = selectScramble(FIXTURE.firstPageSrc, decoded);
 check(
   'selectScramble checksum for pages/2s5rlNj9.jpg',
@@ -98,7 +95,6 @@ check(
 );
 check('selectScramble with no src uses index 0', selectScramble('', decoded).checksum, [0, 0]);
 
-// --- describeScramble -----------------------------------------------------
 check('describeScramble: empty is none', describeScramble('', ''), 'none');
 check('describeScramble: tiled', describeScramble('=8-8+4-AAA', '=8-8-4-BBB'), 'tiled');
 check('describeScramble: numeric', describeScramble('8-8-AAA', '8-8-BBB'), 'numeric');

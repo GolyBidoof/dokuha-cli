@@ -174,7 +174,14 @@ export async function collectPages(target, { quiet = false, onNote } = {}) {
   await glue.decrypt_session(open.session_id, drm.code, open.payload, drm.payload);
 
   const dpr = 2;
-  const manifest = await glue.open_param({ dpr, limit: 2000, size: 1200, flag: 0 });
+  // `size` is not just the viewer's window: the WASM emits each page's tile
+  // coordinates in the coordinate space of this box, and `shuffle` reads them
+  // back from the CDN image, which is served at the page's intrinsic size. Asking
+  // for a downscaled box (size 1200) therefore made the recorded source offsets
+  // cover only the top-left corner of every image, and the rebuilt page came out
+  // as a shuffled mosaic. A limit/size above the intrinsic size returns the
+  // intrinsic page and the offsets line up with the image one-to-one.
+  const manifest = await glue.open_param({ dpr, limit: 10000, size: 10000, flag: 0 });
   const pages = manifest?.pages || [];
 
   // 4. one name per page

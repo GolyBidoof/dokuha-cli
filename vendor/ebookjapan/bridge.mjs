@@ -78,10 +78,11 @@ export async function discoverBridge(explicit, { timeoutMs = 3000 } = {}) {
   return null;
 }
 
-// One keep-alive pool per protocol: the bridge is a single local host, so
-// reusing sockets matters more than parallelism.
-const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 8, maxFreeSockets: 4 });
-const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 8, maxFreeSockets: 4 });
+// One keep-alive pool per protocol. Finalize uses a long-lived response stream
+// while OCR and remote uploads complete, so a small socket cap silently becomes
+// a bridge-job concurrency cap even when --bridge-parallel is unlimited.
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: Infinity, maxFreeSockets: 4 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: Infinity, maxFreeSockets: 4 });
 
 // VENDORED DEVIATION: the global start-rate gate that used to live here is gone,
 // and neither COOLDOWN.minIntervalMs nor this comment should be read as evidence
@@ -120,7 +121,9 @@ function request(baseUrl, method, pathname, opts = {}) {
       });
       res.on('error', reject);
     });
-    req.setTimeout(opts.timeoutMs || 30_000, () => req.destroy(new Error(`bridge timeout after ${opts.timeoutMs}ms`)));
+    req.setTimeout(opts.timeoutMs || 30_000, () => req.destroy(new Error(
+      `bridge timeout after ${opts.timeoutMs || 30_000}ms (${method} ${pathname})`,
+    )));
     req.on('error', reject);
     if (opts.body) req.write(opts.body);
     req.end();
@@ -184,10 +187,45 @@ export class BridgeClient {
 
   async health(opts) { return request(this.baseUrl, 'GET', '/health', { ...opts, json: true }); }
 
+  // The first /sessions after a bridge restart reconciles persisted OCR caches
+  // across every live session, so large queues can take longer than a short poll.
+  async sessions({ timeoutMs = 120_000 } = {}) {
+    const r = await request(this.baseUrl, 'GET', '/sessions', { timeoutMs, json: true });
+    if (r.status !== 200) throw new Error(`sessions ${r.status}: ${(r.text || '').slice(0, 160)}`);
+    return r.json;
+  }
+
+  /** Shared OCR worker and per-session pending/processing counts. */
+  async queue({ timeoutMs = 30_000 } = {}) {
+    const r = await request(this.baseUrl, 'GET', '/queue', { timeoutMs, json: true });
+    if (r.status !== 200) throw new Error(`queue ${r.status}: ${(r.text || '').slice(0, 160)}`);
+    return r.json;
+  }
+
   /** Configured upload destinations + which one the bridge considers default. */
   async destinations({ timeoutMs = 5000 } = {}) {
     const r = await request(this.baseUrl, 'GET', '/upload-methods', { timeoutMs, json: true });
     if (r.status !== 200) throw new Error(`upload-methods ${r.status}`);
+    return r.json;
+  }
+
+  async destinationCheck(title, { method = 'local', localDir = null, timeoutMs = 60_000 } = {}) {
+    const { body, contentType } = multipart({
+      title: String(title || ''),
+      method: String(method || 'local'),
+      local_dir: String(localDir || ''),
+    });
+    const r = await request(this.baseUrl, 'POST', '/destination/check', {
+      body,
+      headers: { 'Content-Type': contentType },
+      timeoutMs,
+      json: true,
+    });
+    if (r.status !== 200) {
+      const error = new Error(`destination/check ${r.status}: ${(r.text || '').slice(0, 300)}`);
+      error.status = r.status;
+      throw error;
+    }
     return r.json;
   }
 
@@ -197,7 +235,8 @@ export class BridgeClient {
    * `reuseExisting` resumes a session that already holds pages -- which is what
    * makes re-runs cheap, since the bridge caches OCR per page. A session that is
    * mid-finalize or already finalized cannot be resumed (the bridge answers 400
-   * "Session is finalizing or already finalized"), so retry once without reuse.
+   * "Session is finalizing or already finalized"). Never retry that as a fresh
+   * session: callers must inspect live bridge state before deciding what to do.
    */
   async startSession(title, { reuseExisting = false, timeoutMs = 15000 } = {}) {
     const post = async reuse => {
@@ -206,11 +245,12 @@ export class BridgeClient {
       return request(this.baseUrl, 'POST', '/session/start',
         { body, headers: { 'Content-Type': contentType }, timeoutMs, json: true });
     };
-    let r = await post(reuseExisting);
-    if (reuseExisting && r.status === 400 && /finalizing or already finalized/i.test(r.text || '')) {
-      r = await post(false);
+    const r = await post(reuseExisting);
+    if (r.status !== 200) {
+      const error = new Error(`session/start ${r.status}: ${(r.text || '').slice(0, 200)}`);
+      error.status = r.status;
+      throw error;
     }
-    if (r.status !== 200) throw new Error(`session/start ${r.status}: ${(r.text || '').slice(0, 200)}`);
     return r.json;
   }
 
@@ -291,10 +331,14 @@ export class BridgeClient {
     }
   }
 
-  async status(sessionId, { timeoutMs = 5000 } = {}) {
+  async status(sessionId, { timeoutMs = 30_000 } = {}) {
     const r = await request(this.baseUrl, 'GET', `/session/${encodeURIComponent(sessionId)}/status`,
       { timeoutMs, json: true });
-    if (r.status !== 200) throw new Error(`status ${r.status}`);
+    if (r.status !== 200) {
+      const error = new Error(`status ${r.status}`);
+      error.status = r.status;
+      throw error;
+    }
     return r.json;
   }
 
@@ -404,7 +448,6 @@ export async function resolveDestination(client, { dest = null, folder = null } 
            currentFolder: (methods.find(m => m.id === method) || {}).current_folder || null };
 }
 
-/** One-line human summary of the destinations the bridge offers. */
 export function describeDestinations(info) {
   const methods = (info && info.methods) || [];
   const def = (info && (info.upload_method_selected || info.upload_method_default)) || 'local';

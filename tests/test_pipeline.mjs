@@ -183,6 +183,24 @@ function fakeStore({ timeline, delay = 30 }) {
 }
 
 // ---------------------------------------------------------------------------
+// 2b. A full hand-off queue wakes download workers when a bridge worker dequeues
+// ---------------------------------------------------------------------------
+{
+    const timeline = [];
+    const config = makeConfig(['--parallel', '6', '--bridge-parallel', '1']);
+    const ids = Array.from({ length: 18 }, (_, i) =>
+        `0000249001_jp_${String(30 + i).padStart(4, '0')}`);
+    const { summary } = await run(ids, config, {
+        out: { write() {} },
+        err: { write() {} },
+        callAdapter: fakeStore({ timeline, delay: 1 }),
+        connectBridge: fakeBridge({ timeline, onBridge: () => sleep(2) }),
+    });
+
+    checkEqual('all volumes drain through a full hand-off queue', summary.succeeded, ids.length);
+}
+
+// ---------------------------------------------------------------------------
 // 3. Without a bridge nothing is queued and the lanes behave as before
 // ---------------------------------------------------------------------------
 {

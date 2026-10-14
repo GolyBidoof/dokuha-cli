@@ -1,141 +1,94 @@
-**読破** (*dokuha*): to read a work through to its final page. Not a glance, not a
-chapter, not a volume set aside half-finished. Cover to cover, in order, nothing
-skipped.
+# 読破 (dokuha-cli)
 
----
-
-## Every other tool for this drives a browser
-
-They launch Chrome, load the store's viewer, wait for JavaScript to fetch the pages,
-and scrape the result out of the DOM. That is a lot of moving parts: a ~400 MB
-browser dependency, a renderer to keep patched, selectors that break when a store
-changes its CSS, and a profile you have to sign in to by hand.
-
-**`dokuha` skips the browser entirely.** It speaks each store's own viewer API
-directly. No Chrome, no Puppeteer, no DOM, no selectors. It starts in milliseconds,
-runs on a laptop that has never had a browser installed, and keeps working when a
-store redesigns its frontend, because the API it uses is the one the viewer itself
-is built on.
+**dokuha-cli is the engine and the batch downloader of the dokuha project.** It is a Node CLI that downloads manga volumes from five stores (BookWalker, CMOA, ebookjapan, Kindle and k-manga) at full resolution, unscrambles them offline, and owns *series* downloads: give it a series URL and it finds the free volumes and previews itself.
 
 ```sh
-dokuha 'https://bookwalker.jp/de00000000-0000-4000-8000-000000000001/'
+# paste a title page URL from any store; dokuha lists what is free before it downloads
+dokuha --dry-run --series 'https://www.cmoa.jp/title/<id>/'
 ```
 
-Paste the URL the site gave you. The store is worked out from the URL, the volume is
-downloaded at full resolution, and the pages land on disk as ordinary numbered JPEGs.
+Paste the URL a store gave you, with `<id>` as the store's own number. The store is worked out from the URL, the volume is fetched through the store's own viewer API, and the pages land on disk as ordinary numbered images. CMOA is the easiest first try: it works anonymously, its free volumes are small, and its codec is pure JavaScript, so it needs no extra dependency.
 
-## What you get
+## The three projects
 
-**Five stores, one command.** CMOA, ebookjapan, BookWalker, Amazon Kindle (JP) and
-k-manga, in the same run. Mix URLs from all five; each is detected on its own.
+- **dokuha-cli** (this repository) is the engine and the batch downloader: a Node CLI that downloads manga volumes from five stores at full resolution, unscrambles them offline, and owns series downloads.
+- **dokuha-userscript** is the in-browser companion. What you can install today is the earlier userscript release, [bookwalker-ebookjapan-cmoa-native-downloader](https://github.com/GolyBidoof/bookwalker-ebookjapan-cmoa-native-downloader), which covers BookWalker, CMOA and ebookjapan: it downloads the single volume you already have open, with no install beyond a userscript manager. The rewrite that adds Kindle and k-manga is in development and not published yet.
+- **mokuro-bridge** is where all three converge. It is a small local service that runs mokuro OCR on finished pages and uploads the result to MEGA, Google Drive, OneDrive or a local folder, producing the `.cbz` / `.mokuro` / `.webp` trio that reader.mokuro.app reads. Both downloaders hand finished volumes to it, so OCR and upload are identical no matter which one produced the pages.
 
-**Paste a series, get the series.** Hand it a title page instead of a volume and it
-reads the volume grid, takes the volumes that are free to read *in full*, and skips
-the ones that are only a preview. One flag takes the previews too, filed separately
-so a ten-page sample can never be mistaken for the book.
+This repository is the CLI only. The userscripts and the bridge are separate projects, and the bridge runs on your own machine.
+
+## What this CLI is responsible for
+
+**Five stores, one command.** BookWalker, CMOA, ebookjapan, Amazon Kindle (JP) and k-manga, in the same run. Mix URLs from all five; each is detected on its own.
+
+**Paste a series, get the series.** Hand it a title page with `--series` and it reads the volume listing, takes the volumes that are free to read in full, and skips the ones that are only a preview. `--download-samplers` carries on and takes each remaining volume's 試し読み sampler as well, filed under its own `（試し読み）` folder so a ten-page sample can never be mistaken for the book.
 
 ```sh
-dokuha --series --download-samplers 'https://www.cmoa.jp/title/000000/'
+dokuha --series 'https://www.cmoa.jp/title/000000/'
+dokuha --series --download-samplers 'https://ebookjapan.yahoo.co.jp/books/000000/'
 ```
 
-**OCR and upload included.** `--mokuro` hands finished volumes to
-[mokuro-bridge](https://github.com/GolyBidoof/mokuro-bridge) for OCR and delivery to
-local disk, MEGA, Drive or OneDrive. Downloading and OCR run as independent stages,
-so a volume waiting on a slow upload no longer stalls the network behind it.
+**OCR and upload included.** `--mokuro` hands finished volumes to [mokuro-bridge](https://github.com/GolyBidoof/mokuro-bridge) for OCR and delivery. Downloading and OCR run as independent stages, so a volume waiting on a slow upload no longer stalls the network behind it.
 
-**Almost nothing to configure.** Free volumes and previews on four of the five stores
-need no account, no cookies and no login. There is exactly one optional dependency,
-and it installs by itself.
+**Almost nothing to configure.** Free volumes and previews on four of the five stores need no account, no cookies and no login. There is one optional dependency, `sharp`, used for image work; it installs by itself.
 
 ```sh
 npm install -g dokuha-cli
+dokuha --help
 ```
 
-Requires Node 20+. See [docs/auth.md](docs/auth.md) for the two cases that do need a
-signed-in session.
+Requires Node 20 or newer. [docs/auth.md](docs/auth.md) covers the two cases that do need a signed-in session.
 
-## Built to be fast, and measured
+`dokuha` checks npm for a newer release at most once a day and prints one line to stderr when one exists, naming the new version and the exact upgrade command. The check never delays a download, stays quiet for `--json` and `--quiet` and whenever stderr is not a terminal, so scripts never have to parse it, and any network failure is silent. `DOKUHA_UPDATE_NOTICE=1` opts a non-terminal back in, and `DOKUHA_NO_UPDATE_CHECK=1` turns the check off entirely. Run `dokuha --check-update` to ask right now and get an exit code: 0 when current, 1 when a newer release exists, 2 when the check failed. Run `dokuha --update` to print and then run `npm install -g dokuha-cli@latest` for a global npm install; it refuses when the running copy is a git checkout or a local install, where that command would upgrade the wrong thing.
 
-Not a claim, a set of numbers that are reproducible from the shipped CLI:
+## Where it converges with the other two
 
-- A ten-volume batch across all five stores, by phase and at wall level:
-  [docs/bench-5-stores.md](docs/bench-5-stores.md)
-- Running seven volumes at once instead of four at a time: **80.1s to 21.1s**
-- Uploading a 244-page volume through the bridge went from 15 s of dead time to
-  nothing, about 11x, once a global request-rate floor was removed
-- Page rebuilding moved onto worker threads, because it is pure CPU and was
-  serialising the event loop that resolves the fetches
+The CLI writes a volume folder of finished pages. It can stop there, or it can hand the folder to mokuro-bridge with `--mokuro`, which is the same hand-off the userscript makes. The bridge does the OCR, builds the `.cbz` / `.mokuro` / `.webp` trio and uploads it.
 
-Some of it was not straightforward. k-manga's viewer has no page requests to
-intercept at all: a HAR of a whole read is almost entirely stylesheets and
-analytics, and the actual book arrives down a WebSocket in its own framing. Capturing
-that, and interleaving several sockets when the store turned out to pace connections
-rather than requests, is most of the work in that adapter.
+mokuro-bridge remembers the last upload method it was given, because that is how the bridge itself works. Naming one with `--dest` therefore changes where later runs land too, including runs started by other programs; leave `--dest` off to keep using the bridge's current destination. `--dest-folder` applies when the destination is `local`, and a relative path is resolved on this machine, not on the bridge.
 
-Every `--json` result carries a `phases` breakdown, so when a volume is slow you can
-see whether it was the handshake, the CDN, the rebuild or the write, rather than
-guessing.
+## Why a CLI and not a browser
 
-The reasoning and the measurements are in
-[docs/parallelism.md](docs/parallelism.md) and [docs/phase-timing.md](docs/phase-timing.md).
+Every store here has a private viewer API. `dokuha` speaks to that API directly, so there is no Chrome, no Puppeteer, no DOM and no CSS selectors to keep patched. It starts in milliseconds, runs on a machine that has never had a browser installed, and is not broken by a frontend redesign.
 
-## Your library, arranged properly
+The one price is sessions: a browserless tool cannot sign you in, so a title already in your account is opened with cookies you copy from a browser. Free volumes do not need that. See [docs/auth.md](docs/auth.md).
 
-```
-library/
-  サンプル作品 (1)/
-    page-0001.jpg
-    page-0002.jpg
-    metadata.json
-  サンプル作品 (2)/
-  サンプル作品 (3)（試し読み）/
-```
+## Key advantages
 
-Pages are `page-0001.jpg` on every store, so one `sort` gives one reading order
-across a mixed library. Modification times are one second apart, so readers that sort
-by date get the right sequence without an archive file. Two volumes whose titles
-happen to be identical are kept apart rather than merged.
+- **Series-aware.** `--series` walks a title page or a series page and finds the free-in-full volumes; `--download-samplers` adds the previews without ever letting them collide with the whole volume.
+- **Full resolution.** Pages are written at the size the store serves, not a viewer thumbnail. ebookjapan pages are rebuilt from the viewer's own shuffle geometry rather than screenshotted.
+- **Two-stage pipeline.** Download and OCR are separate stages with a queue between them, so a slow upload never blocks the next volume.
+- **Shared CPU budget.** Page rebuilding is CPU-bound, so `src/cpu-budget.js` divides one machine-wide budget across the stores that are actually running.
+- **Resumable.** Finished pages are checkpoints. Re-run the same command and only missing or invalid pages are fetched; `--force` starts over.
+- **Machine-readable.** `--json` prints one summary with per-volume results and a five-phase timing breakdown, so a slow volume can be attributed to the handshake, the fetch, the rebuild or the write.
 
-## Being straight about where it is
+## Use cases
 
-This is an early release and it is worth saying what that means.
-
-- **Start with one volume.** Not a large queue. The stores can change their viewers
-  without warning, and when they do this stops working until the engines are
-  updated.
-- **Kindle needs your cookies.** An Amazon volume is never public, not even a
-  limited-time-free one, so there is no anonymous route. That is Amazon's model, not
-  a gap in the tool.
-- **k-manga is throttled by the store.** Throughput has a ceiling the client cannot
-  raise, and that ceiling moves over minutes, so wall time is not predictable.
-- **ebookjapan is CPU-bound**, because its pages have to be rebuilt from a shuffle
-  the store never publishes. More parallel volumes stop helping once the cores are
-  busy.
-- **It is not affiliated with any store**, and it does not defeat anything: it takes
-  what a store offers publicly, or what your own session already entitles you to.
-
-Per-store details are in [docs/architecture.md](docs/architecture.md).
+- Download the free and preview volumes of a series you are following, from any of the five stores, in one command.
+- Back up volumes you already own, with your own session, into a uniform `page-0001.jpg` layout.
+- Queue a series for OCR and MEGA or Drive upload through mokuro-bridge, and read the result in reader.mokuro.app.
+- Feed another tool: the per-page layout and the `metadata.json` marker are stable enough to script against.
 
 ## Options
 
-There are a few dozen. `dokuha --help` is the honest list, grouped the way you would
-look for them:
+`dokuha --help` shows the dozen flags a normal run needs, then an **Advanced** section for store-specific and tuning options: per-store page concurrency, CMOA volume selection, BookWalker session internals and bridge destinations. The defaults come from measurement, so most runs need only a URL and `--out`.
 
 ```sh
 dokuha --help
 ```
 
-## Under the hood
+Flags are grouped by purpose. `--out` is where volumes are written, `--series` and `--download-samplers` select a series, `--mokuro` opts into the bridge, `--force` re-fetches, `--json` is for scripts, and `--dry-run` lists the work without downloading.
 
-Each store is a single descriptor: the URLs it answers to, its progress label, how a
-title expands, its series walk, and how one volume is fetched. Adding a sixth store
-means writing one adapter, not touching the driver, the scheduler, the display or
-the summary.
+## In-depth docs
 
-The five store engines are vendored separately, in the shape each was written in,
-each keeping its own retry and connection policy, because that is the part that is
-easiest to get subtly wrong. The full explanation is
-[docs/architecture.md](docs/architecture.md).
+- [docs/stores.md](docs/stores.md): per-store support matrix, sessions, free versus paid, samplers and known limits.
+- [docs/auth.md](docs/auth.md): BookWalker and Kindle sessions, cookie forms and the state files.
+- [docs/naming.md](docs/naming.md): how volume folders, series folders and page names are derived.
+- [docs/troubleshooting.md](docs/troubleshooting.md): the common failures and what to do about them.
+- [docs/architecture.md](docs/architecture.md): the platform registry, the two-stage scheduler and the vendored engines.
+- [docs/parallelism.md](docs/parallelism.md), [docs/phase-timing.md](docs/phase-timing.md), [docs/bench-5-stores.md](docs/bench-5-stores.md) and [docs/bench-2026-10-13-download-modes.md](docs/bench-2026-10-13-download-modes.md): the measurements behind the defaults, including a full five-store serial against parallel run.
+- [vendor/README.md](vendor/README.md): the three vendored engines and every deliberate deviation from upstream.
+- [docs/audits/2026-10-13-pre-release-audit.md](docs/audits/2026-10-13-pre-release-audit.md) and [docs/audits/2026-09-30-five-store-audit.md](docs/audits/2026-09-30-five-store-audit.md): dated audit snapshots, kept for the record rather than as current documentation.
 
 ## Tests
 
@@ -143,15 +96,10 @@ easiest to get subtly wrong. The full explanation is
 npm test
 ```
 
-26 files, offline and hermetic: no network, no credentials, no model. Every title and
-identifier in the fixtures is invented.
+31 test files are discovered; 30 run offline and one is a live network check that is skipped unless `DOKUHA_TEST_NETWORK=1` is set. The offline suite is hermetic: no network, no credentials, no OCR model. Every title and identifier in the fixtures is invented.
 
-## Credits
+## Credits and licence
 
-Written by [GolyBidoof](https://github.com/GolyBidoof) and **DeepSeek V4.1 Flash**.
-DeepSeek V4.1 Flash wrote the driver, the option parser, the store adapters, the
-progress display and the test suite.
-
-## Licence
+Written by [GolyBidoof](https://github.com/GolyBidoof) and **DeepSeek V4.1 Flash**, which wrote the driver, the option parser, the store adapters, the progress display and the test suite.
 
 MIT. [LICENSE](LICENSE)

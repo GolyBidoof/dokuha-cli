@@ -6,6 +6,7 @@ export const C = {
   green: '\x1b[32m',
   yellow: '\x1b[33m',
   magenta: '\x1b[35m',
+  blue: '\x1b[34m',
   cyan: '\x1b[36m',
 
   white: '\x1b[97m',
@@ -13,9 +14,13 @@ export const C = {
 
 
 export function useColor(stream) {
-  if (process.env.NO_COLOR) return false;
-  if (process.env.FORCE_COLOR) return true;
-  return Boolean(stream && stream.isTTY);
+    // FORCE_COLOR wins, and `FORCE_COLOR=0` means off rather than "truthy string".
+    const forced = process.env.FORCE_COLOR;
+    if (forced !== undefined && forced !== '' && forced !== 'false') {
+        return forced !== '0';
+    }
+    if (process.env.NO_COLOR) return false;
+    return Boolean(stream && stream.isTTY);
 }
 
 export function humanBytes(n) {
@@ -69,6 +74,34 @@ export function clampLine(line, width) {
   const suffix = line.endsWith(C.reset) ? C.reset : '';
   const body = suffix ? line.slice(0, -C.reset.length) : line;
   return truncate(body, width) + suffix;
+}
+
+// Wrap a line to `width` display columns, breaking on a space when one is
+// available and mid-run when it is not. The live block redraws by counting the
+// rows it wrote, so a note longer than the terminal must be wrapped here rather
+// than left to the terminal: a wrapped line occupies more rows than the writer
+// counted, and the redraw then clears the wrong number and the block eats itself.
+export function wrapLine(line, width) {
+  const text = String(line ?? '');
+  const limit = Math.max(20, width);
+  if (displayWidth(text) <= limit) return [text];
+
+  const out = [];
+  let rest = text;
+  while (displayWidth(rest) > limit) {
+    let end = 0;
+    for (let i = 1; i <= rest.length; i += 1) {
+      if (displayWidth(rest.slice(0, i)) > limit) break;
+      end = i;
+    }
+    if (end === 0) end = 1;
+    let cut = rest.lastIndexOf(' ', end);
+    if (cut <= 0) cut = end;
+    out.push(rest.slice(0, cut));
+    rest = rest.slice(cut).replace(/^\s+/, '');
+  }
+  out.push(rest);
+  return out;
 }
 
 export function truncate(text, max) {

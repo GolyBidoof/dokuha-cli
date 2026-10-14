@@ -21,7 +21,6 @@
 
 'use strict';
 
-// --- Shared helpers ---------------------------------------------------------
 
 function arraySwap(arr, a, b) {
     const t = arr[a];
@@ -29,7 +28,6 @@ function arraySwap(arr, a, b) {
     arr[b] = t;
 }
 
-// --- Custom base64 decode (A8j) --------------------------------------------
 // BookWalker's base64 alphabet is the standard A-Z a-z 0-9 + / set, but the
 // decode uses shifted bit masks per byte position.
 const ARR1 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.split('');
@@ -499,7 +497,6 @@ function A9p(page, width, height) {
     return out;
 }
 
-// --- Per-page seeds ---------------------------------------------------------
 
 function xorHash(key) {
     let nhf = 0, ohf = key.length & -4;
@@ -593,7 +590,6 @@ function descramblePage(rgba, width, height, seeds) {
     return { data, width: w, height: h };
 }
 
-// --- CDN image filename token (b8gNo) --------------------------------------
 
 function v_jdf(filename) {
     const n = parseInt(filename, 10);

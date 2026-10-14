@@ -6,7 +6,7 @@
  * and sends the user looking in the wrong place.
  */
 
-import { canExpandSeries, detectSource, isSeriesPage, KINDLE_UNLIMITED_LABEL, STORE_LABELS } from '../src/detect.js';
+import { canExpandSeries, detectSource, isSeriesPage, KINDLE_UNLIMITED_LABEL, platformFor, STORE_LABELS } from '../src/platforms/index.js';
 import { check, checkEqual, finish } from './_harness.mjs';
 
 const CMOA_UUID = 'de00000002-0000-4000-8000-000000000002';
@@ -199,6 +199,60 @@ const CMOA_UUID = 'de00000002-0000-4000-8000-000000000002';
     checkEqual('a launcher is resolved as a volume', campaign.kind, 'kmanga-volume');
 
     checkEqual('the store has a short label', STORE_LABELS.kmanga, 'KM');
+}
+
+// An absolute URL is owned by one host. Before this, every store's unanchored
+// pattern was tried against it, so a link to another store inside a query string
+// handed the URL to that store's adapter -- and Kindle, tested first, stole it.
+{
+    const ebjWithRef = detectSource('https://ebookjapan.yahoo.co.jp/books/621001/A009000007/?ref=https://www.amazon.co.jp/dp/B0CKM9VJZ1');
+    checkEqual('a cross-host ref does not steal an ebookjapan URL', ebjWithRef.kind, 'ebookjapan');
+    check('and it carries no Kindle ASIN', ebjWithRef.asin === undefined);
+
+    const bwWithRef = detectSource('https://bookwalker.jp/de00000001-0000-4000-8000-000000000001/?from=https://www.amazon.co.jp/dp/B0CKM9VJZ1');
+    checkEqual('a cross-host ref does not steal a BookWalker URL', bwWithRef.kind, 'bookwalker');
+
+    const cmoaWithRef = detectSource('https://www.cmoa.jp/bib/speedreader/?cid=0000249001_jp_0001&rurl=https://www.amazon.co.jp/dp/B0CKM9VJZ1');
+    checkEqual('a cross-host ref does not steal a CMOA URL', cmoaWithRef.kind, 'cmoa');
+    checkEqual('the CMOA cid survives', cmoaWithRef.cid, '0000249001_jp_0001');
+
+    const kmangaWithRef = detectSource('https://comic.k-manga.jp/title/12345/vol/3/?ref=https://www.cmoa.jp/title/999/');
+    checkEqual('a cross-host ref does not steal a k-manga URL', kmangaWithRef.kind, 'kmanga-volume');
+    checkEqual('the k-manga volume survives', kmangaWithRef.volume, 3);
+
+    checkEqual('an unrelated host is not searched for store patterns',
+        detectSource('https://example.com/?u=https://www.cmoa.jp/title/249001/').kind, 'unknown');
+}
+
+// A host that belongs to a store, but a path that is not a volume, is reported as
+// unreadable rather than queued as a nameless download.
+{
+    checkEqual('the ebookjapan homepage is not a volume',
+        detectSource('https://ebookjapan.yahoo.co.jp/').kind, 'unknown');
+    checkEqual('an ebookjapan account page is not a volume',
+        detectSource('https://ebookjapan.yahoo.co.jp/mypage/').kind, 'unknown');
+    const amazon = detectSource('https://www.amazon.co.jp/');
+    checkEqual('the amazon homepage is not a volume', amazon.kind, 'unknown');
+    check('an owned host with no readable path says so',
+        /CMOA URL/.test(detectSource('https://www.cmoa.jp/').reason),
+        detectSource('https://www.cmoa.jp/').reason);
+
+    const viewer = detectSource('https://ebookjapan.yahoo.co.jp/viewer/free/B00167056462/');
+    checkEqual('the documented viewer URL still resolves', viewer.kind, 'ebookjapan');
+}
+
+// Every kind a task can carry must resolve to an adapter. A series walk publishes
+// tasks under the store id (`kmanga`) while a pasted URL is detected under a pattern
+// kind (`kmanga-volume`); when only the pattern kinds were registered, k-manga
+// resolved by URL and failed at download time with "no platform is registered".
+{
+    for (const id of ['bookwalker', 'cmoa', 'ebookjapan', 'kindle', 'kmanga']) {
+        check(`the store id ${id} resolves to its adapter`, platformFor(id)?.id === id);
+    }
+    for (const kind of ['cmoa-title', 'cmoa', 'ebookjapan', 'ebookjapan-title',
+        'bookwalker', 'bookwalker-series', 'kindle', 'kmanga-volume', 'kmanga-title']) {
+        check(`the detected kind ${kind} resolves to an adapter`, platformFor(kind) !== null);
+    }
 }
 
 finish();

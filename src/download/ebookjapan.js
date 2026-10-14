@@ -6,8 +6,9 @@ import { fetchWithRetry } from '../../vendor/ebookjapan/download.mjs';
 import { loadGlue } from '../../vendor/ebookjapan/wasm.mjs';
 import { assertSharpAvailable, composePage, recordShuffle, sharpAvailable } from './ebj-descramble.js';
 import { safeFolderName, volumeFolder, writeVolumeMarker } from './volume-folder.js';
+import { existingVolume } from './existing-volume.js';
 import { timed } from '../phase-timer.js';
-import { adoptLegacyPages, pageFileName, stampPageTimes } from './page-files.js';
+import { adoptLegacyPages, isCompleteImageFile, pageFileName, stampPageTimes } from './page-files.js';
 import { createSerialQueue } from '../serial.js';
 import {
     EBJ_ORIGIN,
@@ -70,26 +71,8 @@ async function readEbookjapanManifest(folder) {
 // goes through the shared sanitiser rather than a second, looser rule-set.
 const safeName = (value) => safeFolderName(String(value ?? '').normalize('NFC'), 'ebookjapan-volume');
 
-async function isCompleteImage(file, size, extension) {
-    let fh;
-    try {
-        fh = await fsp.open(file, 'r');
-        const head = Buffer.alloc(12);
-        const { bytesRead } = await fh.read(head, 0, 12, 0);
-        if (bytesRead < 12) return false;
-        if (extension === 'webp') {
-            if (head.toString('latin1', 0, 4) !== 'RIFF') return false;
-            if (head.toString('latin1', 8, 12) !== 'WEBP') return false;
-        } else if (head[0] !== 0xff || head[1] !== 0xd8 || head[2] !== 0xff) {
-            return false;
-        }
-
-        return head.readUInt32LE(4) + 8 === size;
-    } catch {
-        return false;
-    } finally {
-        await fh?.close().catch(() => {});
-    }
+async function isCompleteImage(file) {
+    return isCompleteImageFile(file);
 }
 
 function tell(progress, method, ...args) {
@@ -122,20 +105,19 @@ export async function downloadEbookjapan(task, ctx = {}) {
     if (!out) throw new Error('ebookjapan: ctx.out is required');
 
     let descramble;
+    let missingSharp = false;
+    let warnMissingSharp = false;
     if (ctx.descramble === false) {
         descramble = false;
     } else if (ctx.descramble === true) {
-        assertSharpAvailable();
         descramble = true;
     } else if (sharpAvailable()) {
         descramble = true;
     } else {
         descramble = false;
-        warn(ctx.progress,
-            'ebookjapan: pages are tile-scrambled and the optional "sharp" dependency is not installed,\n'
-            + '  so the scrambled mosaic will be written as downloaded.\n'
-            + '  Install it with:  npm install sharp');
+        warnMissingSharp = true;
     }
+    missingSharp = ctx.descramble === true && !sharpAvailable();
 
     const concurrency = Math.max(1, Math.min(MAX_CONCURRENCY,
         Number(ctx.ebConcurrency ?? ctx.concurrency) || DEFAULT_CONCURRENCY));
@@ -144,15 +126,6 @@ export async function downloadEbookjapan(task, ctx = {}) {
     const retries = Number.isFinite(wanted) ? Math.max(0, wanted) : DEFAULT_RETRIES;
     const force = Boolean(ctx.force);
     const progress = ctx.progress;
-
-    tell(progress, 'update', key, {
-        label: task?.title || key,
-        phase: 'downloading',
-        total: 0,
-        done: 0,
-        failed: 0,
-        bytes: 0,
-    });
 
     // Not wrapped in `handshake` from here: `collectPagesSerial` times its own
     // handshake (licence + page list) and prework (WASM module + shuffle table)
@@ -174,6 +147,27 @@ export async function downloadEbookjapan(task, ctx = {}) {
         sample: task.sample === true,
         sanitize: safeName,
     });
+    const existing = await existingVolume(ctx, {
+        store: 'ebookjapan', title: book.name || task?.title, id,
+        sample: task.sample === true, expectedPages: book.totalPages, folder,
+        checkRemote: !task?.title,
+    });
+    if (existing) return existing;
+    if (missingSharp) assertSharpAvailable();
+    if (warnMissingSharp) {
+        warn(progress,
+            'ebookjapan: pages are tile-scrambled and the optional "sharp" dependency is not installed,\n'
+            + '  so the scrambled mosaic will be written as downloaded.\n'
+            + '  Install it with:  npm install sharp');
+    }
+    tell(progress, 'update', key, {
+        label: book.name || task?.title || key,
+        phase: 'downloading',
+        total: book.totalPages,
+        done: 0,
+        failed: 0,
+        bytes: 0,
+    });
     await fsp.mkdir(folder, { recursive: true });
 
     // A scrambled page is written as the store sent it, which is WebP. A rebuilt
@@ -193,7 +187,12 @@ export async function downloadEbookjapan(task, ctx = {}) {
     const previous = force
         ? null
         : await readEbookjapanManifest(folder);
-    const reuseExisting = !force && Boolean(previous?.descrambled) === descramble;
+    // A manifest is written only after the whole volume succeeds. If Ctrl+C
+    // interrupts the first run, complete page files are still a valid checkpoint;
+    // reuse them on the retry and fetch only missing/broken pages. `--force` remains
+    // the explicit way to discard that checkpoint and refetch everything.
+    const reuseExisting = !force
+        && (!previous || Boolean(previous.descrambled) === descramble);
 
     tell(progress, 'update', key, { label: book.name || key, total: rows.length });
 
@@ -217,7 +216,7 @@ export async function downloadEbookjapan(task, ctx = {}) {
             if (reuseExisting) {
 
                 const st = await fsp.stat(dest).catch(() => null);
-                if (st && st.size > 0 && await isCompleteImage(dest, st.size, extension)) {
+                if (st && st.size > 0 && await isCompleteImage(dest)) {
                     row.bytes = st.size;
                     bytes += st.size;
                     skipped++;
@@ -347,6 +346,7 @@ export async function downloadEbookjapan(task, ctx = {}) {
         store: 'ebookjapan',
         id,
         title: book.name || task?.title || String(target),
+        expectedPages: book.totalPages,
     });
 
     if (!downloaded && !skipped) {
@@ -421,12 +421,19 @@ export const platform = {
     id: 'ebookjapan',
     label: 'EBJ',
     lane: 'net',
+    tuning: {
+        concurrency: DEFAULT_CONCURRENCY,
+        contextKey: 'ebConcurrency',
+        cpuWeight: 0.6,
+        flag: { name: 'eb-concurrency', order: 2, help: 'ebookjapan pages in flight' },
+    },
+    hosts: ['ebookjapan.yahoo.co.jp'],
     patterns: [
         { re: /ebookjapan\.yahoo\.co\.jp\/books\/(\d+)\/([A-Za-z0-9]+)/i, kind: 'ebookjapan',
             build: (m, raw) => ({ kind: 'ebookjapan', titleId: m[1], publication: m[2], url: raw }) },
         { re: /ebookjapan\.yahoo\.co\.jp\/books\/(\d+)\/?(?:[?#]|$)/i, kind: 'ebookjapan-title',
             build: (m, raw) => ({ kind: 'ebookjapan-title', titleId: m[1], url: raw }) },
-        { re: /ebookjapan\.yahoo\.co\.jp/i, kind: 'ebookjapan',
+        { re: /ebookjapan\.yahoo\.co\.jp\/(?:viewer|title)\//i, kind: 'ebookjapan',
             build: (m, raw) => ({ kind: 'ebookjapan', url: raw }) },
         { re: /^(B\d{6,})$/, kind: 'ebookjapan',
             build: (m, raw) => ({ kind: 'ebookjapan', code: m[1], url: raw }) },

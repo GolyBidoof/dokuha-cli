@@ -6,7 +6,8 @@ import { createRequire } from 'node:module';
 import { USER_AGENT } from '../user-agent.js';
 import { timed } from '../phase-timer.js';
 import { SAMPLE_SUFFIX, volumeFolder, writeVolumeMarker } from './volume-folder.js';
-import { stampPageTimes } from './page-files.js';
+import { existingVolume } from './existing-volume.js';
+import { isCompleteImageFile, stampPageTimes } from './page-files.js';
 import { connectWebSocket } from './kmanga-ws.js';
 import {
     KM_API_URL,
@@ -268,8 +269,12 @@ export async function resolveKmangaInput(det, config, input, ctx = {}) {
     const free = page.volumes.filter((v) => !v.sample);
     const samples = page.volumes.filter((v) => v.sample);
 
+    // `samplers` is carried on the context, not the flag record: every other
+    // adapter reads `ctx.samplers`, and reading a `config.samplers` that is never
+    // set silently ignored --download-samplers for this store alone.
+    const takeSamplers = ctx?.samplers === true;
     const usable = config.series
-        ? (config.samplers ? [...free, ...samples] : free)
+        ? (takeSamplers ? [...free, ...samples] : free)
         : page.volumes;
 
     const chosen = wanted != null && !config.series
@@ -287,7 +292,7 @@ export async function resolveKmangaInput(det, config, input, ctx = {}) {
 
     const notes = [];
     if (config.series && samples.length) {
-        notes.push(config.samplers
+        notes.push(takeSamplers
             ? `  k-manga ${page.name || bookId}: ${free.length} free volume(s), plus ${samples.length} 試し読み sampler(s)`
             : `  k-manga ${page.name || bookId}: ${samples.length} sample-only volume(s) skipped; --download-samplers takes them`);
     }
@@ -465,21 +470,6 @@ export async function downloadKmanga(task, ctx = {}) {
     };
 
     let descramble = true;
-    if (ctx.descramble === false) {
-        descramble = false;
-    } else if (sharpAvailable()) {
-        descramble = true;
-    } else if (ctx.descramble === true) {
-        assertSharpAvailable();
-    } else {
-        throw new Error(
-            'k-manga pages are block-scrambled and need the optional "sharp" dependency to be un-shuffled.\n'
-            + '  Install it with:  npm install sharp\n'
-            + '  Or pass --no-descramble to keep the scrambled pages deliberately.',
-        );
-    }
-
-    tell('update', { label: task.title || key, phase: 'downloading', total: 0, done: 0, failed: 0, bytes: 0 });
 
     // The launcher mints the ticket the socket needs, so the session is unavoidably
     // first. The index is not: it is a second HTTP round trip whose only product is the
@@ -511,7 +501,6 @@ export async function downloadKmanga(task, ctx = {}) {
     const shown = task.target || title;
 
     const folder = await volumeFolder(ctx, { title, id, sample: task.sample === true });
-    await fsp.mkdir(folder, { recursive: true });
 
     const depth = Math.max(1, Math.min(MAX_PIPELINE, Number(ctx.kmConcurrency) || DEFAULT_PIPELINE));
     const processLimit = Math.max(1, Math.min(PROCESS_LIMIT, depth));
@@ -552,18 +541,41 @@ export async function downloadKmanga(task, ctx = {}) {
                     .slice()
                     .sort((a, b) => Number(a.startSceneNo) - Number(b.startSceneNo));
                 total = pages.length;
+                const alreadyPresent = await existingVolume(ctx, {
+                    store: 'kmanga', title: shown, id, sample: task.sample === true,
+                    expectedPages: total, folder, checkRemote: !task.title,
+                });
+                if (alreadyPresent) {
+                    await indexPromise;
+                    return alreadyPresent;
+                }
+                if (ctx.descramble === false) {
+                    descramble = false;
+                } else if (sharpAvailable()) {
+                    descramble = true;
+                } else if (ctx.descramble === true) {
+                    assertSharpAvailable();
+                } else {
+                    throw new Error(
+                        'k-manga pages are block-scrambled and need the optional "sharp" dependency to be un-shuffled.\n'
+                        + '  Install it with:  npm install sharp\n'
+                        + '  Or pass --no-descramble to keep the scrambled pages deliberately.',
+                    );
+                }
+                await fsp.mkdir(folder, { recursive: true });
                 work = [];
                 for (const [position, entry] of pages.entries()) {
                     const file = PAGE_NAME(position + 1);
                     const full = path.join(folder, file);
-                    if (!ctx.force && await exists(full)) {
+                    if (!ctx.force && await isCompleteImageFile(full)) {
+                        bytes += (await fsp.stat(full)).size;
                         skipped += 1;
                         done.add(position);
                         continue;
                     }
                     work.push({ index: position, entry, sceneNo: Number(entry.startSceneNo), file, full });
                 }
-                tell('update', { label: title, total, done: skipped });
+                tell('update', { label: title, phase: 'downloading', total, done: skipped });
             }
 
             const todo = work.filter((item) => !done.has(item.index) && !permanent.has(item.index));
@@ -673,6 +685,7 @@ export async function downloadKmanga(task, ctx = {}) {
         bookId,
         volume: task.volume ?? null,
         title: shown,
+        expectedPages: total,
         sample: task.sample === true,
         descrambled: descramble,
         chapters: (await indexPromise)?.chapters || null,
@@ -692,10 +705,6 @@ export async function downloadKmanga(task, ctx = {}) {
         bytes,
         failures,
     };
-}
-
-async function exists(file) {
-    return fsp.access(file).then(() => true, () => false);
 }
 
 async function pageBytes(frame, entry, descramble) {
@@ -730,6 +739,21 @@ export const platform = {
     id: 'kmanga',
     label: 'KM',
     lane: 'net',
+    tuning: {
+        // 16 is the tested CLI default; the adapter's own fallback stays 8 for a
+        // direct caller. The socket cap is k-manga behaviour and stays in the walk.
+        concurrency: 16,
+        contextKey: 'kmConcurrency',
+        cpuWeight: 0.6,
+        flag: {
+            name: 'km-concurrency',
+            order: 5,
+            max: 32,
+            help: 'k-manga requests outstanding on each viewer socket, 1-32',
+            hint: '; a long volume opens up to 4 sockets, and the store is slower past ~16 per socket, not faster',
+        },
+    },
+    hosts: ['comic.k-manga.jp'],
     patterns: [
         { re: /comic\.k-manga\.jp\/title\/(\d+)\/vol\/(\d+)/i, kind: 'kmanga-volume',
             build: (m, raw) => ({ kind: 'kmanga-volume', bookId: m[1], volume: Number(m[2]), url: raw }) },

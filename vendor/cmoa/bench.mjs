@@ -109,7 +109,6 @@ if (!cpuOnly) {
   }
 }
 
-// --- worker-thread scaling ------------------------------------------------
 console.log('\n--- render throughput vs worker threads ---');
 {
   const { RenderPool } = await import('./src/render_pool.js');
@@ -142,7 +141,6 @@ console.log('\n--- render throughput vs worker threads ---');
   }
 }
 
-// --- local pipeline, no network -------------------------------------------
 console.log('\n--- local decode + descramble + encode (single core) ---');
 const sampleSize = Math.min(24, pages.length);
 const sample = [];

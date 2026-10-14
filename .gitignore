@@ -2,9 +2,10 @@
 node_modules/
 
 # Downloaded content. This tool writes whole volumes of copyrighted material;
-# a default run must never be committable.
-library/
-out/
+# a default run must never be committable. The wildcards also cover the obvious
+# variations a user reaches for when testing, e.g. `--out library-test`.
+library*/
+out*/
 *.mokuro
 *.zip
 *.cbz
@@ -38,3 +39,6 @@ Thumbs.db
 
 # Local overrides
 .env
+
+# Failure logs: written on any fatal error, never committed
+.dokuha-logs/

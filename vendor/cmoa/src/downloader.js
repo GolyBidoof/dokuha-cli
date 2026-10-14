@@ -140,7 +140,6 @@ export async function openVolume(target, options = {}) {
     author: (item.Authors ?? []).map((a) => a.Name).filter(Boolean).join(', '),
     publisher: item.Publisher || '',
     pageCount: pages.length,
-    /** Build the CDN URL for one page. */
     imageUrl(page, quality = '1') {
       const query = new URLSearchParams({
         cid,
@@ -153,7 +152,6 @@ export async function openVolume(target, options = {}) {
       });
       return `${servers}/sbcGetImg.php?${query.toString()}`;
     },
-    /** Scramble tables selected for one page. */
     tablesFor(page) {
       const { coordTable, pieceTable } = selectScramble(page.src, tables);
       return { coordTable, pieceTable };

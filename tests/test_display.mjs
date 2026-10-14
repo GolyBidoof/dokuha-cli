@@ -8,6 +8,7 @@
  */
 
 import { LiveProgress } from '../src/live-progress.js';
+import { C } from '../src/ansi.js';
 import { check, checkEqual, finish } from './_harness.mjs';
 
 /** A fake TTY that records what was written. */
@@ -24,7 +25,7 @@ function fakeStream(rows = 24) {
 }
 
 // ---------------------------------------------------------------------------
-// The batch bar tracks pages, not finished volumes
+// The batch bar tracks operation stages and never counts queued pages as done
 // ---------------------------------------------------------------------------
 
 {
@@ -35,23 +36,27 @@ function fakeStream(rows = 24) {
     const [a, b] = p.volumes;
 
     a.total = 100; a.done = 50; a.completed = 0;
+    a.phase = 'downloading';
     b.total = 100; b.done = 0; b.completed = 0;
-    // Half of volume A's pages have arrived, but no volume has finished. The old
-    // `completed / known` basis reported 0 here and the bar did not move at all.
-    checkEqual('the bar advances while a volume is still downloading',
-        p.overallFraction(p.totals()), 0.25);
+    // Volume A is half-downloaded, which is half of the download stage's 30 percent;
+    // volume B remains queued and contributes no progress.
+    checkEqual('the global bar includes only work that has actually started',
+        p.overallFraction(p.totals()), 0.075);
+    checkEqual('queued volume progress remains zero', p.volumeWeight(b), 0);
 
     b.total = 100; b.done = 100; b.completed = 100;
-    checkEqual('a finished volume counts towards the bar',
-        p.overallFraction(p.totals()), 0.75);
+    b.phase = 'done';
+    checkEqual('a finished volume counts as complete',
+        p.overallFraction(p.totals()), 0.575);
 
     // A volume that finished with a failed page still counts its full length, so
     // the bar has to reach the end rather than stalling just short of 100%.
     a.total = 100; a.done = 90; a.completed = 100;
-    checkEqual('the bar still completes when a finished volume had failures',
+    a.phase = 'done';
+    checkEqual('the bar completes when every volume is finished',
         p.overallFraction(p.totals()), 1);
 
-    // Nothing known yet: no fraction, so the bar renders blank rather than full.
+    // Empty batches have no fraction, so the bar renders blank rather than full.
     const empty = new LiveProgress({ stream: fakeStream(), width: 100 });
     checkEqual('an unknown total has no fraction', empty.overallFraction(empty.totals()), null);
 }
@@ -64,9 +69,17 @@ function fakeStream(rows = 24) {
     p.add('a', {});
     p.volumes[0].total = 100;
     p.volumes[0].done = 40;
+    p.volumes[0].phase = 'downloading';
     p.draw(true);
-    check('the footer percentage matches the page fraction', /40%/.test(stream.written),
-        'footer did not show 40%');
+    check('the footer percentage matches the staged progress', /12%/.test(stream.written),
+        'footer did not show the started work fraction');
+}
+
+{
+    const p = new LiveProgress({ stream: fakeStream(), width: 100 });
+    p.add('queued', {});
+    checkEqual('queued series cannot make the global bar look complete',
+        p.overallFraction(p.totals()), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -182,9 +195,10 @@ function fakeStream(rows = 24) {
     const v = p.volumes[0];
     v.phase = 'finalizing';
 
-    // Nothing polled yet: the bridge has not said what it is sending, so the bar
-    // stays full rather than dropping to empty and reading as a stall.
-    checkEqual('an unreported finalize keeps its full bar', p.fraction(v), 1);
+    // Nothing polled yet: the bridge has not said what it is sending. The bar holds one
+    // cell short of full, which keeps it from reading as a finished volume while an
+    // upload sits at zero, and keeps it from dropping to empty and reading as a stall.
+    checkEqual('an unreported finalize stops one cell short of full', p.fraction(v), 0.99);
     check('an unreported finalize still says what it is doing',
         /assembling \.mokuro/.test(p.detail(v)), p.detail(v));
 
@@ -260,6 +274,18 @@ function fakeStream(rows = 24) {
     q.update('f', { phase: 'downloading' });
     q.update('f', { phase: 'ocr' });
     checkEqual('the pipeline still advances', q.volumes[0].phase, 'ocr');
+
+    // Bridge finalize reports OCR first, then a remote archive upload. The row
+    // must switch to the upload meter instead of retaining a completed OCR bar.
+    q.update('f', { phase: 'ocr', ocr: 100, ocrTotal: 100 });
+    q.update('f', {
+        phase: 'finalizing', uploadFile: 'volume.cbz', uploadPercent: 42.5,
+        uploadBytes: 42_500, uploadBytesTotal: 100_000, uploadSpeed: '4.00 MiB/s',
+    });
+    checkEqual('bridge upload events switch the row out of OCR', q.volumes[0].phase, 'finalizing');
+    check('the bridge upload meter follows transfer bytes',
+        Math.abs(q.fraction(q.volumes[0]) - 0.425) < 1e-9, String(q.fraction(q.volumes[0])));
+    check('the bridge upload detail retains speed', /4\.00 MiB\/s/.test(q.detail(q.volumes[0])), q.detail(q.volumes[0]));
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +317,99 @@ function fakeStream(rows = 24) {
     q.finish('x', { error: 'boom' });
     check('a failure mid-download keeps how far it got',
         Math.abs(q.fraction(q.volumes[0]) - 0.3) < 1e-9, String(q.fraction(q.volumes[0])));
+}
+
+// ---------------------------------------------------------------------------
+// The batch bar shows the pipeline, not one fraction
+// ---------------------------------------------------------------------------
+
+// The bar's fill is the download stage, so once every volume has downloaded the
+// bar is full even while OCR and the destination upload are still running. OCR
+// then replaces blue with yellow from the left, and the upload replaces yellow
+// with magenta. The percentage on the right stays the true overall completion,
+// which is why it can read lower than the bar looks. These assert on the
+// rendered string, not on the fractions behind it.
+{
+    const savedForce = process.env.FORCE_COLOR;
+    process.env.FORCE_COLOR = '1';
+
+    // Two halves of one batch: one volume fully through download and OCR and
+    // half-way through its archive upload, the other half-way through download.
+    // The run averages are download 0.75, OCR 0.5 and upload 0.25.
+    const split = new LiveProgress({ stream: fakeStream(), width: 100 });
+    // The run has a destination, so the assembling band is meaningful here and the
+    // archive stage shows as cyan rather than being suppressed as a no-upload run.
+    split.uploadExpected = true;
+    split.add('finished', {});
+    split.add('mid', {});
+    Object.assign(split.volumes[0], {
+        phase: 'finalizing', total: 100, done: 100,
+        ocrTotal: 100, ocr: 100, ocrPending: 0,
+        uploadBytes: 50, uploadBytesTotal: 100,
+    });
+    Object.assign(split.volumes[1], { phase: 'downloading', total: 100, done: 50 });
+    const uploadingRuns = split.pipelineBar(20);
+    // OCR and packing both stand at 0.5 here, so the yellow band has no width and the
+    // cyan one takes its place: the bar shows the stage the batch has reached, and the
+    // archive exists once a volume is finalizing, whether or not it is still sending.
+    checkEqual('the bar renders magenta, cyan, blue and empty runs left to right',
+        uploadingRuns,
+        `${C.magenta}${'█'.repeat(5)}${C.reset}`
+        + `${C.cyan}${'█'.repeat(5)}${C.reset}`
+        + `${C.blue}${'█'.repeat(5)}${C.reset}`
+        + `${C.dim}${'░'.repeat(5)}${C.reset}`);
+    checkEqual('the coloured runs and the empty tail fill the width',
+        uploadingRuns.replace(/\x1b\[[0-9;]*m/g, '').length, 20);
+    // Assembling is the window before anything has been sent, and that is what lights
+    // the cyan band.
+    const assembling = new LiveProgress({ stream: fakeStream(), width: 100 });
+    assembling.uploadExpected = true;
+    assembling.add('building', {});
+    Object.assign(assembling.volumes[0], {
+        phase: 'finalizing', total: 100, done: 100, ocrTotal: 100, ocr: 100, ocrPending: 0,
+    });
+    checkEqual('an assembling volume lights the cyan band',
+        assembling.pipelineBar(20),
+        `${C.cyan}${'█'.repeat(20)}${C.reset}`);
+
+    // The case the operator reported: every volume downloaded, OCR only just
+    // started. The bar is full and blue, while the percentage is still low.
+    const reported = new LiveProgress({ stream: fakeStream(), width: 100 });
+    reported.add('v', {});
+    Object.assign(reported.volumes[0], {
+        phase: 'ocr', total: 100, done: 100, ocrTotal: 100, ocr: 0, ocrPending: 0,
+    });
+    const fullBlue = reported.pipelineBar(20);
+    checkEqual('a completed download paints the whole bar blue while OCR runs',
+        fullBlue, `${C.blue}${'█'.repeat(20)}${C.reset}`);
+    check('OCR at zero adds no yellow', !fullBlue.includes(C.yellow), fullBlue);
+    const reportedPct = Number((reported.footer()[0].match(/(\d+)%/) || [])[1] ?? NaN);
+    check('the percentage keeps its own overall meaning beside a full bar',
+        reportedPct === 40, String(reportedPct));
+
+    // Nothing has started: an empty bar, not a full one.
+    const idle = new LiveProgress({ stream: fakeStream(), width: 100 });
+    idle.add('queued', {});
+    const emptyBar = idle.pipelineBar(20);
+    checkEqual('an untouched batch renders an empty bar',
+        emptyBar, `${C.dim}${'░'.repeat(20)}${C.reset}`);
+    check('an untouched batch has no filled cells', !emptyBar.includes('█'), emptyBar);
+
+    // A run with no OCR and no upload: the skipped stages must add no colour, so
+    // once the downloads finish the bar is simply full blue.
+    const plain = new LiveProgress({ stream: fakeStream(), width: 100 });
+    plain.add('done', {});
+    plain.add('mid', {});
+    Object.assign(plain.volumes[0], { phase: 'done', total: 100, done: 100 });
+    Object.assign(plain.volumes[1], { phase: 'downloading', total: 100, done: 100 });
+    const skipped = plain.pipelineBar(20);
+    checkEqual('a run without OCR or upload is full blue once downloads finish',
+        skipped, `${C.blue}${'█'.repeat(20)}${C.reset}`);
+    check('skipped stages contribute neither yellow nor magenta',
+        !skipped.includes(C.yellow) && !skipped.includes(C.magenta), skipped);
+
+    if (savedForce === undefined) delete process.env.FORCE_COLOR;
+    else process.env.FORCE_COLOR = savedForce;
 }
 
 finish();

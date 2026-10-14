@@ -99,10 +99,15 @@ import { check, checkEqual, finish } from './_harness.mjs';
             }
             return { session_id: 'fresh' };
         },
+        sessions: async () => ({ sessions: [{
+            session_id: 'active', title: 'volume 1', pages_received: 24,
+            pages_ocr_done: 12, pages_ocr_pending: 12, finalizing: true,
+        }] }),
+        queue: async () => ({ per_session: [{ session_id: 'active', processing: 1 }] }),
     };
     const recovered = await startBridgeSession(finalized, 'volume 1');
-    checkEqual('a finalizing session falls back to a fresh one', recovered.session_id, 'fresh');
-    checkEqual('the fallback costs exactly two calls', retried, 2);
+    check('a finalizing session is attached instead of duplicated', recovered.existingSession?.session_id === 'active');
+    checkEqual('the conflict does not create another bridge session', retried, 1);
 
     let other = null;
     const unrelated = {
@@ -206,6 +211,15 @@ import { check, checkEqual, finish } from './_harness.mjs';
                 total_bytes: 61_094_103, speed_human: '36.00 MiB/s',
             },
         }),
+        // A sidecar finishing must not move the number: only the archive drives it, so
+        // the cover reaching 100 percent cannot make the bar read as a finished volume.
+        JSON.stringify({
+            stage: 'upload_progress', message: 'y: 100%',
+            upload: {
+                file: '5巻.webp', percent: 100, current_bytes: 9000,
+                total_bytes: 9000, speed_human: '1.00 MiB/s',
+            },
+        }),
         JSON.stringify({ stage: 'done', status: 'success', output_dir: '/out', pages: 10, pages_ocr_done: 10 }),
     ];
 
@@ -253,7 +267,15 @@ import { check, checkEqual, finish } from './_harness.mjs';
         check('the upload is reported while finalize is in flight',
             uploads.length > 0, `${uploads.length} update(s) of ${updates.length}`);
         check('the report names the file', uploads[0]?.uploadFile === '5巻.cbz', JSON.stringify(uploads[0]));
-        check('the report carries the percentage', uploads[0]?.uploadPercent === 42.5, JSON.stringify(uploads[0]));
+        const sidecar = updates.filter((u) => u.uploadFile === '5巻.webp').pop();
+        check('a finished sidecar leaves the archive percentage alone',
+            sidecar?.uploadPercent === 42.5, JSON.stringify(sidecar));
+        // The archive drives the percentage and the sidecars leave it alone. Averaging
+        // the trio held the bar at a third and then at two thirds while the real
+        // transfer was still running, which read as a stall beside a speed that kept
+        // updating.
+        check('the archive percentage is reported as the volume percentage',
+            uploads[0]?.uploadPercent === 42.5, JSON.stringify(uploads[0]));
         check('the report carries the speed', uploads[0]?.uploadSpeed === '36.00 MiB/s', JSON.stringify(uploads[0]));
         check('the report carries the byte counts',
             uploads[0]?.uploadBytes === 26_000_000 && uploads[0]?.uploadBytesTotal === 61_094_103,
@@ -363,11 +385,23 @@ import { check, checkEqual, finish } from './_harness.mjs';
     checkEqual('the OCR failure count is read from the last wait_ocr frame', record.ocrFailed, 1);
     checkEqual('the OCR done count still comes from the done frame', record.ocrDone, 2);
 
+    const resumed = await pushToBridge({
+        baseUrl: 'http://127.0.0.1:62642',
+        async resumeSession() { throw new Error('completed receipt should bypass the bridge'); },
+        async startSession() { throw new Error('completed receipt should bypass the bridge'); },
+        async pushPage() { throw new Error('completed receipt should bypass the bridge'); },
+        async finalize() { throw new Error('completed receipt should bypass the bridge'); },
+    }, { method: 'local', params: {} }, target, { progress: null, pushConcurrency: 4 });
+    checkEqual('a completed identical volume is recognized on rerun', resumed.ingest, 'already-completed');
+    checkEqual('a completed rerun does not claim more OCR work', resumed.ocrDone, 2);
+    fs.rmSync(path.join(dir, '.dokuha-bridge-completion.json'), { force: true });
+
     // A bridge that refuses the path -- or whose resume handler throws -- falls back
     // to the per-page path. The 500 case is not hypothetical: mokuro-bridge 0.6.0
     // answered 500 on every folder while its per-page route worked fine, and a
     // volume must not be lost to an optimisation the user never asked for.
     for (const [status, label] of [[403, 'a refused folder'], [404, 'an old bridge'], [500, 'a broken bridge']]) {
+        fs.rmSync(path.join(dir, '.dokuha-bridge-completion.json'), { force: true });
         calls.resume = 0; calls.start = 0; calls.pages = 0;
         const refusing = {
             ...stub,
@@ -386,6 +420,7 @@ import { check, checkEqual, finish } from './_harness.mjs';
 
     // A deep store failure is not an excuse to re-upload a library.
     calls.resume = 0; calls.pages = 0;
+    fs.rmSync(path.join(dir, '.dokuha-bridge-completion.json'), { force: true });
     let rethrown = '';
     try {
         await pushToBridge({
@@ -404,6 +439,7 @@ import { check, checkEqual, finish } from './_harness.mjs';
 
     // A remote bridge cannot see our filesystem, so it must never be handed a path.
     calls.resume = 0; calls.pages = 0;
+    fs.rmSync(path.join(dir, '.dokuha-bridge-completion.json'), { force: true });
     await pushToBridge({ ...stub, baseUrl: 'http://10.0.0.5:62642' },
         { method: 'local', params: {} }, target, { progress: null, pushConcurrency: 4 });
     check('a remote bridge is never asked to read a local path',
@@ -411,6 +447,7 @@ import { check, checkEqual, finish } from './_harness.mjs';
 
     // And the whole thing is switchable off.
     calls.resume = 0; calls.pages = 0;
+    fs.rmSync(path.join(dir, '.dokuha-bridge-completion.json'), { force: true });
     await pushToBridge(stub, { method: 'local', params: {} }, target,
         { progress: null, pushConcurrency: 4, folderIngest: false });
     check('--no-folder-ingest forces the upload path',
@@ -431,6 +468,44 @@ import { check, checkEqual, finish } from './_harness.mjs';
         message = error.message;
     }
     check('an empty folder is reported, not ingested', /no page images found/.test(message), message);
+    fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// A duplicate folder resume can race a page already in the bridge OCR worker.
+// Wait for that page to leave processing, then retry the idempotent sync rather
+// than marking the volume failed on the transient 409.
+{
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dokuha-resume-race-'));
+    fs.writeFileSync(path.join(dir, 'page_0001.webp'), 'same page bytes');
+    let resumeCalls = 0;
+    let queueCalls = 0;
+    const client = {
+        baseUrl: 'http://127.0.0.1:62642',
+        async resumeSession() {
+            resumeCalls++;
+            if (resumeCalls === 1) {
+                const error = new Error("session/resume 409: {\"detail\":\"Page is currently being OCR'd: page_0001.webp\"}");
+                error.status = 409;
+                throw error;
+            }
+            return { session_id: 'resume-race', synced_from_source: 0, queued_for_ocr: 0, ocr_cached: 1 };
+        },
+        async sessions() {
+            return { sessions: [{ session_id: 'resume-race', title: 'Volume 1', pages_received: 1, pages_ocr_done: 0, pages_ocr_pending: 1 }] };
+        },
+        async queue() {
+            queueCalls++;
+            return { per_session: [{ session_id: 'resume-race', processing: queueCalls < 3 ? 1 : 0 }] };
+        },
+        async status() { return { pages_received: 1, pages_ocr_done: 0, pages_ocr_pending: 1, ingesting: false }; },
+        async finalize() { return { status: 'success', pages_ocr_done: 1, output_files: [] }; },
+    };
+    const record = await pushToBridge(client, { method: 'local', params: {} },
+        { key: 'race', title: 'Volume 1', folder: dir },
+        { progress: null, pushConcurrency: 1 });
+    checkEqual('the OCR-in-progress conflict retries folder resume', resumeCalls, 2);
+    checkEqual('the conflict is recovered as a folder session', record.ingest, 'folder');
+    checkEqual('the transient page conflict does not fail the volume', record.pagesFailed, 0);
     fs.rmSync(dir, { recursive: true, force: true });
 }
 

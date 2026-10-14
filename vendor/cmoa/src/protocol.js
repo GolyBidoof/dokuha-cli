@@ -96,7 +96,6 @@ export function decodeTable(cid, k, encoded) {
   return JSON.parse(out);
 }
 
-/** Decode all four scramble tables at once. */
 export function decodeTables(cid, k, item) {
   return {
     stbl: decodeTable(cid, k, item.stbl),

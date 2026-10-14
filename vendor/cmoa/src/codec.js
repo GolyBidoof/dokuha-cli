@@ -13,7 +13,6 @@ import { encodeJpeg } from './jpeg_encode.js';
 import { encodePng } from './png.js';
 import { compileDescrambler } from './descrambler.js';
 
-/** Supported output formats. */
 export const FORMATS = ['png', 'jpeg', 'jpg', 'original'];
 
 export function normaliseFormat(format) {
@@ -287,7 +286,6 @@ function renderPageJs(bytes, tables, options = {}) {
   };
 }
 
-/** True when at least one region actually moves pixels. */
 function changesAnything(regions) {
   if (!regions) return false;
   return regions.some((r) => r.xsrc !== r.xdest || r.ysrc !== r.ydest);

@@ -49,23 +49,24 @@ try {
     // three flags parse and show up in --help, but the driver handed every store
     // the CMOA value, so --eb-concurrency was dead and ebookjapan ran at 12
     // instead of its documented 32. The parser tests in test_options.mjs passed
-    // throughout, because they only ever checked the parse.
+    // throughout, because they only ever checked the parse. The defaults now come
+    // from each store's `tuning` block, so the driver reads the registry instead
+    // of listing the stores; the seam itself is asserted in test_tuning.mjs.
     const ctxText = ctxBlock ? ctxBlock[1] : '';
-    check('the driver gives CMOA its own concurrency',
-        /cmoaConcurrency:\s*config\.cmConcurrency/.test(ctxText), 'no cmoaConcurrency in the ctx block');
-    check('the driver gives ebookjapan its own concurrency',
-        /ebConcurrency:\s*config\.ebConcurrency/.test(ctxText), 'no ebConcurrency in the ctx block');
-    check('the driver gives BookWalker its own concurrency',
-        /bwConcurrency:\s*config\.bwConcurrency/.test(ctxText), 'no bwConcurrency in the ctx block');
-    check('no store is still fed the CMOA concurrency under a shared name',
-        !/concurrency:\s*config\.cmConcurrency/.test(ctxText),
-        'a shared ctx.concurrency is still set from --cm-concurrency');
+    check('the driver resolves per-store concurrency through the registry',
+        /concurrencyContext\(config/.test(ctxText),
+        'run.js does not spread the registry-derived concurrency context');
+    check('the driver no longer assigns a store concurrency by hand',
+        !/config\.(?:cm|eb|bw|kdl|km)Concurrency/.test(ctxText),
+        'a store concurrency is still assigned by name in the ctx block');
 
     // The CMOA adapter must forward the budget on the request that can fail before
     // any page is fetched, which is the licence call.
     const cmoaSource = fs.readFileSync(new URL('../src/download/cmoa.js', import.meta.url), 'utf8');
     const ebSource = fs.readFileSync(new URL('../src/download/ebookjapan.js', import.meta.url), 'utf8');
     const bwSourceForConcurrency = fs.readFileSync(new URL('../src/download/bookwalker.js', import.meta.url), 'utf8');
+    const kindleSource = fs.readFileSync(new URL('../src/download/kindle.js', import.meta.url), 'utf8');
+    const kmangaSource = fs.readFileSync(new URL('../src/download/kmanga.js', import.meta.url), 'utf8');
 
     check('the ebookjapan adapter reads its own concurrency key',
         /ctx\.ebConcurrency/.test(ebSource), 'ebookjapan.js never reads ctx.ebConcurrency');
@@ -73,6 +74,10 @@ try {
         /ctx\.cmoaConcurrency/.test(cmoaSource), 'cmoa.js never reads ctx.cmoaConcurrency');
     check('the BookWalker adapter reads its own concurrency key',
         /ctx\.bwConcurrency/.test(bwSourceForConcurrency), 'bookwalker.js never reads ctx.bwConcurrency');
+    check('the Kindle adapter reads its own concurrency key',
+        /ctx\.kdlConcurrency/.test(kindleSource), 'kindle.js never reads ctx.kdlConcurrency');
+    check('the k-manga adapter reads its own concurrency key',
+        /ctx\.kmConcurrency/.test(kmangaSource), 'kmanga.js never reads ctx.kmConcurrency');
 
     // Every store key must still be honoured by its adapter, and the old shared
     // name kept only as a fallback for a direct caller.
@@ -119,10 +124,10 @@ try {
     // --help and the README, parsed into a table entry, and then never read back
     // out of `v`, so k-manga silently ran at a hardcoded 8 instead of 16. A test
     // that only checks the parse passes that bug, so each flag is followed all the
-    // way: declared, parsed to a number, and put on the context the adapter reads.
+    // way: declared, parsed to a number, and wired to the field its adapter reads.
     {
         const { OPTIONS } = await import('../src/options.js');
-        const ctxText = ctxBlock ? ctxBlock[1] : '';
+        const { PLATFORMS, concurrencyContext } = await import('../src/platforms/index.js');
         const perStore = OPTIONS
             .filter((opt) => opt.name.endsWith('-concurrency') && opt.name !== 'push-concurrency')
             .map((opt) => ({
@@ -136,9 +141,17 @@ try {
             const flagName = flag.replace(/^--/, '');
             const parsed = parseOptions([flagName, '7']).config[key];
             check(`${flag} parses to a number`, Number.isInteger(parsed) && parsed > 0, String(parsed));
-            check(`${flag} reaches the store context`, new RegExp(`\\b${key}\\s*[:,]`).test(ctxText),
-                `config.${key} is never put on the context`);
         }
+
+        // The driver wires each store onto the field its adapter reads, under keys
+        // that belong to the store rather than one shared name. Unique values prove
+        // no store is handed another store's number.
+        const stored = concurrencyContext({
+            cmConcurrency: 11, ebConcurrency: 22, bwConcurrency: 33, kdlConcurrency: 44, kmConcurrency: 55,
+        }, PLATFORMS);
+        checkEqual('every store concurrency reaches its adapter field',
+            [stored.cmoaConcurrency, stored.ebConcurrency, stored.bwConcurrency, stored.kdlConcurrency, stored.kmConcurrency],
+            [11, 22, 33, 44, 55]);
 
         // --concurrency is the shared override for the five store page counts.
         for (const { key } of perStore) {

@@ -66,7 +66,6 @@ function clean(s, n = 44) {
 /** Visual for a stage that is running without a known total. */
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-/** Short label for what a volume is doing right now. */
 function stageLabel(v) {
   switch (v.state) {
     case 'downloading': return 'download';
@@ -166,7 +165,6 @@ export class Progress {
       (bad.length ? this.paint(` · ${bad.length} failed`, 'red') : '');
   }
 
-  /** Aggregate footer across every volume. */
   totalsLine() {
     const all = this.order.map(k => this.volumes.get(k));
     if (all.length < 2) return null;
@@ -232,7 +230,6 @@ export class Progress {
       (v.bytes ? this.paint(` · ${humanBytes(v.bytes)}`, 'dim') : '');
   }
 
-  /** The second line for the roomy single-volume layout. */
   noteLine(v) {
     // The meter already states where it went; the note adds where it lives.
     if (v.state === 'complete') return clean(v.path || '', 64);
@@ -248,7 +245,6 @@ export class Progress {
     return '';
   }
 
-  /** One volume rendered as one or two lines. */
   renderVolume(v) {
     const mark = v.state === 'complete' ? this.paint('✓', 'green')
       : v.state === 'error' ? this.paint('✗', 'red')

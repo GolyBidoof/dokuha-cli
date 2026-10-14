@@ -1,0 +1,73 @@
+name: publish
+
+# Publishing happens on a tag push, matching how the other two projects release:
+# every version bump gets a vX.Y.Z tag and a GitHub Release carrying that
+# version's changelog body.
+#
+# The upload uses npm Trusted Publishing (OIDC), so there is no NPM_TOKEN to
+# store or rotate. The one-time setup on npmjs.com is:
+#
+#   Package settings -> Trusted Publisher -> GitHub Actions
+#     Organization or user: GolyBidoof
+#     Repository:           dokuha-cli
+#     Workflow filename:    publish.yml
+#     Environment:          (none)
+#
+# Until that publisher exists the publish step fails with an OIDC error; the
+# checks above it still run, which is the part worth reading on a normal commit.
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Pack and check only, do not publish"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: check, pack and publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC for Trusted Publishing and provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: The tag must match package.json
+        # A tag that disagrees with the packaged version publishes a release whose
+        # tarball claims something else, and npm will not let the number be
+        # reused. Fail here rather than after the upload.
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          echo "tag=$tag package=$pkg"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json ($pkg)"
+            exit 1
+          fi
+
+      - run: npm test
+
+      # The tarball is the release. Print what it contains and how big it is on
+      # every run, so a stray directory or a missing file is visible in the log
+      # rather than discovered after publishing.
+      - name: Pack
+        run: npm pack --dry-run
+
+      - name: Publish
+        # A tag publishes. A manual dispatch publishes only when dry_run is
+        # explicitly turned off, so the default dispatch is a safe rehearsal.
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.dry_run == false
+        run: npm publish --provenance --access public

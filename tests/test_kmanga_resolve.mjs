@@ -65,7 +65,9 @@ async function folderFor(task, root) {
     check('and says how many samplers it left behind',
         /--download-samplers/.test(plain.notes.join(' ')), plain.notes.join(' '));
 
-    const withSamplers = await resolveKmangaInput(title, { series: true, samplers: true }, 'title', ctx);
+    // `samplers` rides on the context, like every other store's resolver reads it;
+    // the config argument only carries the plain flags.
+    const withSamplers = await resolveKmangaInput(title, { series: true }, 'title', { ...ctx, samplers: true });
     checkEqual('samplers are appended after the free volumes', targets(withSamplers), [
         'サンプル作品 (1)', 'サンプル作品 (2)', 'サンプル作品 (3)（試し読み）', 'サンプル作品 (4)（試し読み）',
     ]);
@@ -121,7 +123,7 @@ async function folderFor(task, root) {
 // Under `--series` the volume number is only the entry point, which is what every
 // other store means by it.
 {
-    const walked = await resolveKmangaInput(volume(1), { series: true, samplers: true }, 'vol1', ctx);
+    const walked = await resolveKmangaInput(volume(1), { series: true }, 'vol1', { ...ctx, samplers: true });
     checkEqual('--series walks the series from whatever volume was pasted', ids(walked), [
         '180001vol1', '180001vol2', '180001vol3sample', '180001vol4sample',
     ]);
@@ -141,7 +143,7 @@ async function folderFor(task, root) {
 // One request per input: the title page is fetched once and parsed once.
 {
     asked = [];
-    await resolveKmangaInput(title, { series: true, samplers: true }, 'title', ctx);
+    await resolveKmangaInput(title, { series: true }, 'title', { ...ctx, samplers: true });
     checkEqual('the title page is fetched exactly once', asked.length, 1);
     check('from the title URL for that book', /\/title\/180001\/pv$/.test(asked[0]), asked[0]);
 }

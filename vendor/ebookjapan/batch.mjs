@@ -59,7 +59,6 @@ for (const f of PASS) {
   if (v !== true) passthrough.push(String(v));
 }
 
-// ------------------------------------------------------------------ inputs
 const consumed = new Set();
 for (let i = 0; i < argv.length; i++) {
   if (VALUE_FLAGS.has(argv[i])) { consumed.add(i); consumed.add(i + 1); }
@@ -112,7 +111,6 @@ export async function expand(input) {
   throw new Error('no volume links found on that page');
 }
 
-// ------------------------------------------------------------------- runner
 function runOne(link) {
   return new Promise(resolve => {
     const child = spawn(process.execPath, [
@@ -138,7 +136,6 @@ function runOne(link) {
   });
 }
 
-// --------------------------------------------------------------------- main
 async function main() {
   if (!inputs.length) { console.error(USAGE); process.exit(2); }
 

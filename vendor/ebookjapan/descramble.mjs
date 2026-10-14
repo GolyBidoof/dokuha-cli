@@ -58,7 +58,6 @@ const PDF    = opt('--pdf', null);
 const GLOB   = typeof opt('--glob', null) === 'string' ? opt('--glob') : 'page_{:03d}.webp';
 const REPORT = typeof opt('--report', null) === 'string' ? opt('--report') : path.join(OUT, 'descramble_report.json');
 
-// ---------------------------------------------------------------- table load
 function loadTable(p) {
   const t = JSON.parse(fs.readFileSync(p, 'utf8'));
   const geo = t.geometry || t;
@@ -111,7 +110,6 @@ sys.stdout.buffer.write(im.tobytes())
   return { w, h, data: out.subarray(8) };
 }
 
-/** Encode raw RGBA to the requested format via Python. */
 function encodeRGBA(file, w, h, data, format) {
   const py = `
 import sys
@@ -127,7 +125,6 @@ else:
   spawnSync('python3', ['-c', py, file, String(w), String(h), format], { input: data, maxBuffer: 1 << 30 });
 }
 
-/** Grayscale copy of an RGBA buffer, as a Float64Array-ish plain array. */
 function toGray(w, h, data) {
   const g = new Uint8Array(w * h);
   for (let i = 0, p = 0; i < g.length; i++, p += 4) {
@@ -162,7 +159,6 @@ function compose(src, sw0, sh0, pattern, grid, tile) {
   return { w: W, h: H, data: out };
 }
 
-/** Crop to (0,0,w,h). */
 function crop(img, w, h) {
   const out = Buffer.alloc(w * h * 4);
   for (let y = 0; y < h; y++) {
@@ -171,7 +167,6 @@ function crop(img, w, h) {
   return { w, h, data: out };
 }
 
-// ------------------------------------------------------------- verification
 function meanAbsDiffRow(gray, w, h, y, x0, x1) {
   let s = 0, n = 0;
   const row = y * w;
@@ -234,7 +229,6 @@ function scrambledEdgeScore(gray, w, h, cell) {
   return n ? s / n : 0;
 }
 
-// --------------------------------------------------------------------- main
 const table = loadTable(TABLE);
 const total = table.pagePattern.length;
 const n = LIMIT ? Math.min(total, LIMIT) : total;

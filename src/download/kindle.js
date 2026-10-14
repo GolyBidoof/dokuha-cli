@@ -6,8 +6,10 @@ import { createRequire } from 'node:module';
 import { USER_AGENT } from '../user-agent.js';
 import { timed } from '../phase-timer.js';
 import { RETRY_STATUS, RESTRICTED_STATUS, defaultBackoff as backoff, describeError, retry } from '../retry.js';
+import { writeFailureLog } from '../failure-log.js';
 import { volumeFolder, writeVolumeMarker } from './volume-folder.js';
-import { adoptLegacyPage, legacyPageNames, pageFileName, stampPageTimes } from './page-files.js';
+import { existingVolume } from './existing-volume.js';
+import { adoptLegacyPage, isCompleteImageFile, legacyPageNames, pageFileName, stampPageTimes } from './page-files.js';
 import {
     KINDLE_MAX_WINDOWS,
     KINDLE_ORIGIN,
@@ -18,7 +20,9 @@ import {
     kindleBorrowResult,
     kindleContentType,
     kindleDecodePage,
+    kindleGraphQLError,
     kindleIsVolumeInfo,
+    kindleLibraryCursor,
     kindleLibraryQuery,
     kindleLoansFromLibrary,
     kindleManifestResources,
@@ -112,20 +116,69 @@ export async function saveKindleSession(file, cookie) {
     await fsp.chmod(file, 0o600).catch(() => {});
 }
 
+/** Shown once when no session is present at all, and in `--help` terms. */
+export const KINDLE_COOKIE_HELP = [
+    'Kindle has no anonymous route: every Amazon volume needs your read.amazon.co.jp cookies.',
+    '  1. Sign in at https://read.amazon.co.jp/manga/ in your normal browser.',
+    '  2. Open DevTools (F12) -> Network, click any request to read.amazon.co.jp,',
+    '     right-click it -> Copy -> Copy as cURL.',
+    '  3. Paste that into the flag:  dokuha ... --kindle-cookie "$(pbpaste)"',
+    '  Only read.amazon.co.jp, and only the Japan store, is spoken to.',
+].join('\n');
+
 export function kindleSessionHint(session) {
     if (session?.source === 'argument') {
-        return 'The cookies you passed may have expired. Sign in on read.amazon.co.jp again and copy fresh ones.';
+        return 'The cookies you passed may have expired. Sign in at read.amazon.co.jp again and copy fresh ones.';
     }
     if (session?.source === 'state') {
-        return `The saved session at ${session.stateFile} may have expired. Pass fresh cookies with --kindle-cookie.`;
+        return `The saved session at ${session.stateFile} may have expired. `
+            + 'Pass fresh cookies with --kindle-cookie, or remove that file to start over.';
     }
-    return 'Kindle has no anonymous route: pass your read.amazon.co.jp cookies with --kindle-cookie (see README).';
+    return 'Pass your read.amazon.co.jp cookies with --kindle-cookie (see docs/auth.md).';
+}
+
+/**
+ * Amazon rotates `at-acbjp` and `sess-at-acbjp` and reports the replacements in
+ * `Set-Cookie`. A client that ignores them keeps sending a value the server has
+ * already retired, which comes back as Unauthorized on the library query even
+ * though the sign-in itself is fine. Absorb the new values and persist them.
+ */
+function absorbKindleCookies(session, response) {
+    if (!session || !response?.headers) return;
+    let lines = [];
+    try {
+        lines = typeof response.headers.getSetCookie === 'function'
+            ? response.headers.getSetCookie()
+            : [response.headers.get('set-cookie')].filter(Boolean);
+    } catch {
+        return;
+    }
+    if (!lines.length) return;
+    const jar = new Map();
+    for (const part of String(session.cookie || '').split(';')) {
+        const at = part.indexOf('=');
+        if (at > 0) jar.set(part.slice(0, at).trim(), part.slice(at + 1).trim());
+    }
+    let changed = false;
+    for (const line of lines) {
+        const pair = String(line).split(';')[0];
+        const at = pair.indexOf('=');
+        if (at <= 0) continue;
+        const name = pair.slice(0, at).trim();
+        const value = pair.slice(at + 1).trim();
+        if (!value || jar.get(name) === value) continue;
+        jar.set(name, value);
+        changed = true;
+    }
+    if (!changed) return;
+    session.cookie = [...jar].map(([key, value]) => `${key}=${value}`).join('; ');
+    if (session.stateFile) saveKindleSession(session.stateFile, session.cookie).catch(() => {});
 }
 
 async function kindleFetch(url, session, extraHeaders = {}, { method = 'GET', body, attempts = 3 } = {}) {
     const tries = method === 'GET' ? Math.max(1, attempts) : 1;
     try {
-        return await retry(() => fetch(url, {
+        const response = await retry(() => fetch(url, {
             method,
             redirect: 'follow',
             ...(body === undefined ? {} : { body }),
@@ -139,9 +192,106 @@ async function kindleFetch(url, session, extraHeaders = {}, { method = 'GET', bo
                 ...extraHeaders,
             },
         }), { attempts: tries, wait: backoff });
+        absorbKindleCookies(session, response);
+        return response;
     } catch (error) {
         throw new Error(`the Kindle reader did not answer ${new URL(url).pathname} (${describeError(error)})`);
     }
+}
+
+/**
+ * The collection ASIN that groups a series, read from the Kindle product page.
+ *
+ * The series list endpoint requires it, and it cannot be derived from the volume ASIN:
+ * it is a distinct value the page carries in the markup of its follow/collection widget.
+ * A page without the widget has no collection, and the caller then falls back to the
+ * volume ASIN, which is what the captured request used for a single-edition series.
+ */
+async function kindleProductCollection(asin, session) {
+    const response = await kindleFetch(
+        `${KINDLE_STORE_ORIGIN}/kindle-dbs/product/${encodeURIComponent(asin)}`,
+        session,
+        { Accept: 'text/html,*/*', Referer: `${KINDLE_STORE_ORIGIN}/dp/${asin}` },
+    ).catch(() => null);
+    if (!response?.ok) return null;
+    const html = await response.text();
+    const match = /data-asin="([A-Z0-9]{10})"\s+data-entity-type="collection"/.exec(html);
+    return match ? match[1] : null;
+}
+
+/**
+ * The collection ASIN that groups a series.
+ *
+ * The Kindle product page carries it in the markup of its follow widget, but that page
+ * does not exist for every volume: a Kindle Unlimited only title answers 404, and the
+ * series list endpoint cannot be called without a collection. The store page for the same
+ * volume does exist and lists related ASINs, and at least one of them is a volume whose
+ * Kindle page is served and carries the same collection. So a missing page is hopped
+ * around rather than treated as a series with no volumes.
+ */
+export async function kindleCollectionAsin(asin, session) {
+    const direct = await kindleProductCollection(asin, session);
+    if (direct) return { collection: direct, via: asin };
+    const page = await kindleFetch(`${KINDLE_STORE_ORIGIN}/dp/${encodeURIComponent(asin)}`, session, {
+        Accept: 'text/html',
+        Referer: `${KINDLE_STORE_ORIGIN}/`,
+    }).catch(() => null);
+    if (!page?.ok) return null;
+    const html = await page.text();
+    const related = [...new Set(html.match(/\bB0[0-9A-Z]{8}\b/g) || [])].filter((id) => id !== asin);
+    // Tried together, not in turn. Each candidate is a page fetch, and walking them one
+    // at a time cost several seconds before the first title could be listed.
+    const candidates = related.slice(0, 12);
+    // Taken as they arrive rather than after all of them: the first candidate whose page
+    // is served has the collection, and waiting for the slowest of twelve wasted the
+    // seconds before any title could be listed.
+    try {
+        return await Promise.any(candidates.map(async (id) => {
+            const collection = await kindleProductCollection(id, session);
+            if (!collection) throw new Error('that volume has no collection');
+            return { collection, via: id };
+        }));
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Every volume of a series in one request.
+ *
+ * The store's seriesAsinList endpoint takes a page size, and 100 covers a full series:
+ * a 72-volume series answers with 74 ids in a single 1.2 MB fragment. That replaces the
+ * walk, which needed one reader round trip per volume because each answer named the next
+ * volume. The fragment is markup rather than JSON, so the ids are read out of it, and
+ * the caller treats an empty or unusable answer as "no list" rather than as an empty
+ * series.
+ */
+export async function kindleSeriesVolumeList(asin, session) {
+    const found = await kindleCollectionAsin(asin, session).catch(() => null);
+    const params = new URLSearchParams({
+        // The list endpoint wants a volume whose Kindle page is served, and for a
+        // Kindle Unlimited only title that is not the volume the user pasted, so the
+        // one that carried the collection is used instead.
+        asin: found?.via || asin,
+        pageNumber: '1',
+        pageSize: '100',
+        binding: 'kindle_edition',
+        includePagination: 'true',
+        ...(found?.collection ? { substituteCollectionAsin: found.collection } : {}),
+    });
+    const response = await kindleFetch(
+        `${KINDLE_STORE_ORIGIN}/kindle-dbs/productPage/ajax/seriesAsinList?${params}`,
+        session,
+        {
+            Accept: 'text/html,*/*',
+            'x-requested-with': 'XMLHttpRequest',
+            Referer: `${KINDLE_STORE_ORIGIN}/kindle-dbs/product/${asin}`,
+        },
+    );
+    if (!response.ok) return null;
+    const html = await response.text();
+    const ids = [...new Set(html.match(/\bB0[0-9A-Z]{8}\b/g) || [])];
+    return ids.length ? ids : null;
 }
 
 export async function kindleSeriesInfo(asin, session) {
@@ -271,30 +421,36 @@ export function kindleIsReadable(info) {
     return /^FULL_BOOK$/i.test(method);
 }
 
-export async function kindleOpenNext(asin, session) {
-    const url = `${KINDLE_ORIGIN}/api/manga/open-book?asin=${encodeURIComponent(asin)}&openNextBook=true`;
+/**
+ * One volume's access state, without opening its reader page.
+ *
+ * The walk got this for the next volume as a side effect of asking for it, which is why
+ * it needed one round trip per volume. Asked directly, the same endpoint reports the
+ * volume's own state: FULL_BOOK when the account can read it, SAMPLE when it cannot, and
+ * 204 when there is nothing to say. That is cheap enough to run for every volume of a
+ * series at once, and it does not throw for volumes this account cannot open.
+ */
+export async function kindleVolumeAccess(asin, session) {
+    const url = `${KINDLE_ORIGIN}/api/manga/open-book?asin=${encodeURIComponent(asin)}`;
     const response = await kindleFetch(url, session, {
         Referer: `${KINDLE_ORIGIN}/manga/${asin}`,
         'x-requested-with': 'XMLHttpRequest',
     });
     if (response.status === 204 || response.status === 404) return null;
-    if (!response.ok) {
-        throw new Error(`the Kindle reader answered HTTP ${response.status} while looking for the `
-            + `volume after ${asin}\n  ${kindleSessionHint(session)}`);
-    }
+    if (!response.ok) return null;
     let payload;
     try {
         payload = JSON.parse(await response.text());
     } catch {
         return null;
     }
-    const next = String(payload?.asin || '').toUpperCase();
-    if (!next || next === String(asin).toUpperCase()) return null;
+    const method = String(payload?.bookAccessMethod || '');
     return {
-        asin: next,
-        accessMethod: String(payload.bookAccessMethod || ''),
+        asin,
+        title: '',
+        accessMethod: method,
+        bookAccessMethod: method,
         isFree: kindleIsFree(payload),
-
         revision: revisionFromPrefetch(payload.cdnPrefetchInfo),
     };
 }
@@ -389,13 +545,39 @@ async function kindleReaderApi(session, body, { force = false } = {}) {
             'Accept': '*/*',
             'Content-Type': 'application/json',
             'anti-csrftoken-a2z': token,
+            // The store host validates the anti-CSRF token against the request's
+            // origin, so this call has to look like the site's own: the same Origin
+            // and a /your-books referer. Without Origin the library query answers
+            // Unauthorized in the GraphQL body, while the borrow calls keep working
+            // because those are expected from the reader host instead.
+            'Origin': KINDLE_STORE_ORIGIN,
             Referer: KINDLE_LIBRARY_URL,
         }, { method: 'POST', body: JSON.stringify(body) });
 
         const text = await response.text();
-        const csrfRefused = response.status === 403 || /csrf/i.test(text);
-        if (response.ok && !csrfRefused) return text;
-        if (attempt >= 1 || !csrfRefused) {
+        // A rejected token can arrive as HTTP 200 with an Unauthorized error in the
+        // GraphQL body, which the status check alone never notices: the query then
+        // reads as an empty library rather than as unauthenticated, and every return
+        // reports that the library does not list the loan. Treat it like a CSRF
+        // refusal, so the token is refreshed once and the call is retried.
+        const unauthorized = /unauthorized/i.test(text);
+        const refused = response.status === 403 || /csrf/i.test(text) || unauthorized;
+        if (response.ok && !refused) return text;
+        if (attempt >= 1 || !refused) {
+            if (unauthorized) {
+                // The stored session can still render pages, which is why the token
+                // scrapes fine, but Amazon rejects the library query itself. That is a
+                // stale or superseded sign-in rather than a book missing from the
+                // library, and naming it is the difference between a five second fix
+                // and a day spent changing request headers that were already correct.
+                const error = new Error('Amazon rejected the Kindle library query as Unauthorized: '
+                    + 'the stored session is stale or has been superseded by a newer sign-in. '
+                    + 'Copy the cookies again from a signed-in browser and re-run with --kindle-cookie.'
+                    + `\n  ${kindleSessionHint(session)}`);
+                error.code = 'KINDLE_SESSION_EXPIRED';
+                error.status = response.status;
+                throw error;
+            }
             const error = new Error(`the Kindle reader API answered HTTP ${response.status}`
                 + `${text ? ` — ${text.slice(0, 200)}` : ''}`);
             error.status = response.status;
@@ -406,17 +588,44 @@ async function kindleReaderApi(session, body, { force = false } = {}) {
 }
 
 export async function kindleLibraryLoans(session, { force = false } = {}) {
-    const text = await kindleReaderApi(session, kindleLibraryQuery(), { force });
-
-    return new Map(kindleLoansFromLibrary(text)
-        .filter((loan) => loan.active && loan.unlimited)
-        .map((loan) => [loan.asin, loan.loanId]));
+    const loans = new Map();
+    let after = '';
+    // The library is paginated at thirty a page, so reading one page leaves every
+    // loan past the first thirty looking absent, which is exactly the shape of the
+    // "the library does not list it" report. Follow the cursor, capped so a cursor
+    // that never advances cannot spin forever.
+    for (let page = 0; page < 20; page += 1) {
+        const text = await kindleReaderApi(session, kindleLibraryQuery(after), { force });
+        const rejected = kindleGraphQLError(text);
+        if (rejected) {
+            throw new Error(`the Kindle library query was rejected: ${rejected}`);
+        }
+        for (const loan of kindleLoansFromLibrary(text)) {
+            // `activeBorrow` is the field that says whether a loan is still out: a
+            // borrow the CLI is about to return reads true, and one that has already
+            // gone back reads false while staying in the listing. Requiring it keeps
+            // the lookup to loans that are genuinely returnable, and the retry loop
+            // covers the moment right after a borrow when the listing has not caught
+            // up yet. Ignoring it would attempt returns for loans that are already
+            // back, and the service answers those with a refusal the run treats as
+            // fatal, so a re-run would fail a volume that had nothing left to return.
+            if (loan.active && loan.unlimited) loans.set(loan.asin, loan.loanId);
+        }
+        const cursor = kindleLibraryCursor(text);
+        if (!cursor || cursor === after) break;
+        after = cursor;
+    }
+    return loans;
 }
 
 export async function kindleReturnLoans(items, session) {
     const batch = (Array.isArray(items) ? items : []).filter((item) => item && item.asin && item.loanId);
     if (!batch.length) return true;
     const text = await kindleReaderApi(session, kindleReturnMutation(batch));
+    const rejected = kindleGraphQLError(text);
+    if (rejected) {
+        throw new Error(`the Kindle return was rejected: ${rejected}`);
+    }
     let payload = null;
     try {
         payload = JSON.parse(text);
@@ -607,19 +816,7 @@ function kindleBatchState(ctx) {
 }
 
 async function isCompleteJpeg(file) {
-    const handle = await fsp.open(file, 'r').catch(() => null);
-    if (!handle) return false;
-    try {
-        const { size } = await handle.stat();
-        if (size < 5) return false;
-        const head = Buffer.alloc(3);
-        await handle.read(head, 0, 3, 0);
-        const tail = Buffer.alloc(2);
-        await handle.read(tail, 0, 2, size - 2);
-        return head[0] === 0xFF && head[1] === 0xD8 && head[2] === 0xFF && tail[0] === 0xFF && tail[1] === 0xD9;
-    } finally {
-        await handle.close();
-    }
+    return isCompleteImageFile(file);
 }
 
 export async function downloadKindle(task, ctx = {}) {
@@ -677,6 +874,12 @@ async function downloadOpenedKindle(state, task, ctx, session, { asin, key, conc
 
     const title = state.title || task.title || asin;
     const folder = await volumeFolder(ctx, { title, id: asin, sample: task.sample === true });
+    const existing = await existingVolume(ctx, {
+        store: 'kindle', title, id: asin, sample: task.sample === true,
+        expectedPages: state.pageCount || state.expectedPages || 0, folder,
+        checkRemote: !task.title,
+    });
+    if (existing) return existing;
     await fsp.mkdir(folder, { recursive: true });
 
     tell('update', key, { label: title, phase: 'downloading', done: 0, failed: 0, bytes: 0, total: 0 });
@@ -932,13 +1135,60 @@ async function kindleLibrarySnapshot(ku, session) {
     return promise;
 }
 
-async function queueKindleReturn(ctx, session, asin) {
+/**
+ * The borrowed-loan id, with a short retry. Amazon's `your-books` listing lags the
+ * borrow itself by a moment, and one lookup on the first miss made a return fail —
+ * which both marked a finished volume as failed and left the loan open against the
+ * six-slot ceiling. Forcing a fresh snapshot between tries is enough to close it.
+ */
+async function kindleLoanId(ku, session, asin, { tries = 4, waitMs = 1200 } = {}) {
+    for (let attempt = 0; attempt < tries; attempt++) {
+        const loans = await kindleLibrarySnapshot(ku, session);
+        const loanId = loans?.get?.(asin);
+        if (loanId) return loanId;
+        if (attempt < tries - 1) {
+            ku.loanGeneration += 1;
+            await new Promise((resolve) => setTimeout(resolve, waitMs));
+        }
+    }
+    return null;
+}
+
+function noteUnreturnedLoan(ctx, asin, error, record = null, session = null) {
+    const seen = ctx.kindleUnreturned || (ctx.kindleUnreturned = new Set());
+    seen.add(asin);
+    if (record) {
+        record.returned = false;
+        record.returnNote = error.message;
+    }
+    // A failed return is deliberately non-fatal, which means it used to leave no
+    // trace at all beyond a line of summary. Record the exchange so the next round
+    // has evidence instead of inference.
+    writeFailureLog({
+        label: 'kindle-return',
+        error,
+        extra: [
+            `asin      ${asin}`,
+            `loanId    ${record?.loanId || 'not found'}`,
+            `attempts  ${KINDLE_RETURN_RETRY_MS.length + 1}`,
+            // The cookie is written on purpose. This log exists to settle whether a
+            // rejected return is a stale session or a throttle, and that question
+            // cannot be answered without seeing which session was sent. The file is
+            // mode 0600 and the directory is gitignored, so treat it as a credential.
+            `cookie    ${session?.cookie || '(none)'}`,
+        ],
+    });
+}
+
+async function attemptKindleReturn(ctx, session, asin) {
     const ku = kindleUnlimitedState(ctx);
-    const loans = await kindleLibrarySnapshot(ku, session);
-    const loanId = loans?.get?.(asin);
+    const loanId = await kindleLoanId(ku, session, asin);
     if (!loanId) {
-        throw new Error(`the Kindle library does not list ${asin} as borrowed, so its loan has `
-            + 'no id to return. Check https://www.amazon.co.jp/your-books and return it there.');
+        const error = new Error(`the volume downloaded, but the Kindle library still does not list ${asin} `
+            + 'as borrowed after several checks, so its loan has no id to return. '
+            + 'Return it at https://www.amazon.co.jp/your-books to free the slot.');
+        error.code = 'KINDLE_LOAN_NOT_FOUND';
+        throw error;
     }
     const item = { asin, loanId };
     for (;;) {
@@ -952,6 +1202,62 @@ async function queueKindleReturn(ctx, session, asin) {
     }
 }
 
+// The library API throttles rather than refusing outright: the same cookie answers
+// Unauthorized for a stretch and then works again untouched. A growing wait rides
+// that out, so a return that is merely early is not reported as a failure. The last
+// attempt is the only one worth telling the user about.
+const KINDLE_RETURN_RETRY_MS = [3000, 8000, 20000, 45000];
+
+async function queueKindleReturn(ctx, session, asin, record = null) {
+    const run = async () => {
+        let lastError = null;
+        for (let attempt = 0; attempt <= KINDLE_RETURN_RETRY_MS.length; attempt += 1) {
+            try {
+                const returned = await attemptKindleReturn(ctx, session, asin);
+                // A positive record as well. The log only ever held failures, so a run
+                // that returned every loan left nothing behind to show it had, which
+                // made "returned" and "never attempted" impossible to tell apart.
+                writeFailureLog({
+                    label: 'kindle-returned',
+                    heading: 'result',
+                    error: new Error(`returned ${asin}`),
+                    extra: [
+                        `asin      ${asin}`,
+                        `attempts  ${attempt + 1}`,
+                        `cookie    ${session?.cookie || '(none)'}`,
+                    ],
+                });
+                return returned;
+            } catch (error) {
+                lastError = error;
+                // The service answered `success: false`. Retrying asks the same
+                // question again, and the loan really is still on the shelf.
+                if (error.code === 'KINDLE_RETURN_REFUSED') throw error;
+                const wait = KINDLE_RETURN_RETRY_MS[attempt];
+                if (wait === undefined) break;
+                // Force the next attempt to take a fresh library snapshot rather
+                // than reuse the one that just failed.
+                kindleUnlimitedState(ctx).loanGeneration += 1;
+                await new Promise((resolve) => setTimeout(resolve, wait));
+            }
+        }
+        noteUnreturnedLoan(ctx, asin, lastError, record, session);
+        throw lastError;
+    };
+    if (!ctx.kindleReturnInBackground) return run();
+    // OCR and upload are still ahead, so the return must not hold the volume: start
+    // it and let the run carry on. The teardown awaits this set before reporting, so
+    // the grouped warning covers finished work rather than a snapshot in flight.
+    const work = ctx.kindleReturnWork || (ctx.kindleReturnWork = new Set());
+    const promise = run().catch(() => {});
+    work.add(promise);
+    promise.finally(() => work.delete(promise));
+    // Deliberately returns nothing: the caller awaits this function, and handing back
+    // the promise would make it wait for the return, which is the opposite of running
+    // it in the background. The run's teardown is what waits.
+    return undefined;
+}
+
 async function flushKindleReturns(ku, session) {
     await new Promise((resolve) => setTimeout(resolve, KINDLE_RETURN_SETTLE_MS));
     try {
@@ -960,8 +1266,15 @@ async function flushKindleReturns(ku, session) {
             const handedBack = await kindleReturnLoans(batch, session);
 
             if (!handedBack) {
-                throw new Error(`the Kindle service did not confirm the return of `
+                // The service answered but refused. The loan really is still on the
+                // shelf, so this stays a failure of the run rather than a note: it is
+                // the one return outcome the caller must not paper over. Every other
+                // return problem is a lookup problem and is reported without failing
+                // the volume, because the pages are already on disk.
+                const refused = new Error(`the Kindle service did not confirm the return of `
                     + batch.map((item) => item.asin).join(', '));
+                refused.code = 'KINDLE_RETURN_REFUSED';
+                throw refused;
             }
 
             ku.loanGeneration += 1;
@@ -1032,14 +1345,23 @@ async function borrowAndDownloadKindle(task, ctx, session, originalError, option
         let returnError = null;
         if (borrowed) {
             try {
-                await queueKindleReturn(ctx, session, asin);
+                await queueKindleReturn(ctx, session, asin, record);
             } catch (error) {
                 returnError = error;
             }
         }
         releaseLoanSlot(ku);
         if (returnError) {
-            if (!failure) {
+            if (!failure && record && returnError.code === 'KINDLE_RETURN_REFUSED') {
+                // The service refused, so the loan is still on the shelf and the run
+                // must not claim otherwise. A lookup failure never lands here.
+                failure = returnError;
+            } else if (!failure && record) {
+                // Already recorded by the retry wrapper, which also wrote the log. The
+                // pages are on disk and whole, so this is a cleanup problem, never a
+                // failed volume: treating it as one aborted a whole series before OCR
+                // and upload ever ran, and it cost the run everything already achieved.
+            } else if (!failure) {
                 failure = returnError;
             } else {
 
@@ -1123,11 +1445,69 @@ export async function resolveKindleSeries(det, config = {}, io = {}) {
     const seen = new Set();
 
     let kuSeries = null;
-    let asin = first.asin;
-    let state = first;
-    for (let hop = 0; hop < cap; hop += 1) {
-        if (seen.has(asin)) break;
+    // Discovery is one request for the whole series, and the per-volume access checks
+    // then have no dependency on each other, so they run together instead of one after
+    // another down a chain. The walk needed a round trip per volume because each answer
+    // named the next volume; the list removes that, and 100 covers a full series.
+    const listed = await kindleSeriesVolumeList(first.asin, session);
+    if (!listed?.length) {
+        // No series metadata means the input is a standalone volume, and the caller
+        // downloads it as one. Series metadata with no list is a failed discovery, and
+        // it has to be loud: falling through to a single volume silently downloaded one
+        // book of a nine-volume series and looked like it had worked.
+        if (!seriesSize) {
+            return {
+                tasks,
+                rejected: [],
+                notes,
+                standalone: true,
+                streamed: typeof io.onNote === 'function' || typeof io.onTask === 'function',
+            };
+        }
+        throw new Error(`the Kindle series list for ${first.asin} came back empty, though the `
+            + `series is listed as ${seriesSize} volumes, so it cannot be listed. The store `
+            + 'endpoint that returns the list may have changed.');
+    }
+    const order = listed.slice(0, cap);
+    const states = new Map();
+    const offers = new Map();
+    const samples = new Map();
+    // Every probe starts at once. They are small, they have no dependency on each other,
+    // and a bounded pool only made a series wait in waves: the work here is waiting on the
+    // network, not on the machine, so there is nothing to protect by queueing it.
+    say(`  kindle: checking ${order.length} volumes for access`);
+    await Promise.all(order.map(async (next) => {
+        let state = null;
+        try {
+            state = await kindleVolumeAccess(next, session);
+        } catch {
+            // A volume the account cannot open is left without a state and skipped by the
+            // body below, rather than failing the whole series.
+            state = null;
+        }
+        states.set(next, state);
+        if (kindleIsFree(state) || kindleIsReadable(state)) return;
+        // The entry volume's offer was resolved by the caller before this ran, so probing
+        // it here would ask a question that already has an answer.
+        if (next === first.asin) return;
+        // The Kindle Unlimited offer and the sampler probe are one request each with no
+        // dependency on any other volume, so they belong in this pass rather than in the
+        // loop, where they ran one after another and made a whole series crawl.
+        offers.set(next, await kindleVolumeOffer(next, session).catch(() => null));
+        if (!offers.get(next) && io.samplers) {
+            samples.set(next, await kindleSampleInfo(next, session).catch(() => null));
+        }
+    }));
+    say(`  kindle: ${order.length} volumes checked`);
+    for (const asin of order) {
+        if (seen.has(asin)) continue;
         seen.add(asin);
+        // The entry volume was resolved before this ran, so its state is the one the
+        // caller found; probing it again would replace a known free status with a
+        // bare SAMPLE.
+        const state = asin === first.asin
+            ? first
+            : (states.get(asin) || { asin, title: '', accessMethod: null, isFree: false });
         if (kindleIsFree(state)) {
             deliver({
                 input: det.url,
@@ -1156,7 +1536,7 @@ export async function resolveKindleSeries(det, config = {}, io = {}) {
 
             const offer = (asin === entryAsin && firstOffer)
                 ? firstOffer
-                : await kindleVolumeOffer(asin, session).catch(() => null);
+                : (offers.get(asin) || null);
             if (kuSeries === null) {
                 kuSeries = Boolean(offer);
                 say(kuSeries
@@ -1179,7 +1559,7 @@ export async function resolveKindleSeries(det, config = {}, io = {}) {
                 });
             } else if (io.samplers) {
 
-                const sampleInfo = await kindleSampleInfo(asin, session);
+                const sampleInfo = samples.get(asin) || null;
                 if (sampleInfo) {
                     deliver({
                         input: det.url,
@@ -1197,25 +1577,6 @@ export async function resolveKindleSeries(det, config = {}, io = {}) {
                 }
             }
         }
-        if (seriesSize && seen.size >= seriesSize) break;
-        let next;
-        try {
-            next = await kindleOpenNext(asin, session);
-        } catch (error) {
-
-            say(`  kindle: stopped walking the series at ${asin} — ${error.message}`);
-            break;
-        }
-        if (!next) break;
-        asin = next.asin;
-
-        state = {
-            asin: next.asin,
-            title: '',
-            accessMethod: next.accessMethod,
-            bookAccessMethod: next.accessMethod,
-            isFree: next.isFree,
-        };
     }
 
     const total = seriesSize || seen.size;
@@ -1225,7 +1586,7 @@ export async function resolveKindleSeries(det, config = {}, io = {}) {
     const freeCount = tasks.length - sampleCount - kuCount - entitledCount;
     if (!tasks.length) {
         say(`  kindle ${first.seriesAsin || entryAsin}: nothing to download — none of the `
-            + `${seen.size} volumes walked are free in full or already in your library, and the `
+            + `${seen.size} volumes listed are free in full or already in your library, and the `
             + 'first non-free one is not a Kindle Unlimited title'
             + (io.samplers ? ', and none of them offers a 試し読み sampler' : ''));
     } else if (seen.size > tasks.length) {
@@ -1234,17 +1595,28 @@ export async function resolveKindleSeries(det, config = {}, io = {}) {
         if (entitledCount) parts.push(`${entitledCount} already in your library`);
         if (kuCount) parts.push(`${kuCount} Kindle Unlimited`);
         if (sampleCount) parts.push(`${sampleCount} 試し読み samplers`);
-        say(`  kindle ${first.seriesAsin || entryAsin}: ${parts.join(' and ')} of ${total} volumes walked`);
+        say(`  kindle ${first.seriesAsin || entryAsin}: ${parts.join(' and ')} of ${total} volumes`);
     }
     if (seriesSize && seen.size < seriesSize) {
-        say(`  kindle: walked only ${seen.size} of ${seriesSize} volumes; the walk goes forward `
-            + 'from the volume you pasted, so paste the first volume to cover the whole series');
+        // The advice has to allow for a volume that is simply not out yet. A walk that
+        // ran out of next-volume links from the first volume found everything that
+        // exists, and telling the user to paste the first volume there is wrong advice
+        // for a series whose last volume has not been released.
+        const missing = seriesSize - seen.size;
+        say(`  kindle: the series lists ${seriesSize} volumes and the walk covered ${seen.size}. `
+            + 'It only goes forward from the volume you pasted, so paste the first volume if an '
+            + `earlier one is missing; ${missing === 1 ? 'a volume that has' : 'volumes that have'} `
+            + 'not been released yet cannot be listed at all');
     }
 
     return {
         tasks,
         rejected: [],
         notes,
+        // The series endpoint reports no size for a volume that belongs to no series, and
+        // that is the case where --series should still download the single volume rather
+        // than walking nothing.
+        standalone: !seriesSize,
         streamed: typeof io.onNote === 'function' || typeof io.onTask === 'function',
     };
 }
@@ -1262,6 +1634,15 @@ export const platform = {
     id: 'kindle',
     label: 'KDL',
     lane: 'net',
+    // The cross-cutting knobs the driver reads by descriptor rather than by name.
+    // The flag text lives here so a store carries its own user-facing default.
+    tuning: {
+        concurrency: DEFAULT_CONCURRENCY,
+        contextKey: 'kdlConcurrency',
+        cpuWeight: 0.3,
+        flag: { name: 'kdl-concurrency', order: 4, help: 'Kindle pages in flight' },
+    },
+    hosts: ['amazon.co.jp'],
     patterns: [
         { re: new RegExp(`read\\.amazon\\.co\\.jp\\/manga\\/${KINDLE_ASIN}`, 'i'), kind: 'kindle', build: asin },
         { re: new RegExp(`amazon\\.co\\.jp\\/(?:[^?#\\s]*\\/)?(?:dp|gp\\/product)\\/${KINDLE_ASIN}`, 'i'), kind: 'kindle', build: asin },
@@ -1269,10 +1650,17 @@ export const platform = {
     ],
     volumeId: (det) => det.asin ?? null,
     expand: () => false,
-    series: resolveKindleSeries,
+    // The registry calls `series(det, input, ctx)`; the walk itself takes the
+    // config and session in that shape, so the adapter adapts at the descriptor
+    // rather than the driver learning a Kindle-only branch.
+    series: (det, input, ctx = {}) => resolveKindleSeries(det, ctx.config || {}, {
+        ...ctx,
+        session: ctx.kindleSession,
+    }),
     download: downloadKindle,
     session: {
         load: loadKindleSession,
         hint: kindleSessionHint,
+        howTo: KINDLE_COOKIE_HELP,
     },
 };

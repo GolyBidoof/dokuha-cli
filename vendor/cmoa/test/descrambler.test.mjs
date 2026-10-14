@@ -88,7 +88,6 @@ const check = (name, got, want) => {
   checks.push({ name, got, want, ok });
 };
 
-// --- 1. compare against the reference for every ctbl/ptbl pair in the fixture ---
 let compared = 0;
 let mismatches = 0;
 for (let ci = 0; ci < tables.ctbl.length; ci++) {
@@ -128,7 +127,6 @@ for (let ci = 0; ci < tables.ctbl.length; ci++) {
 check('reference comparisons run', compared > 0, true);
 check('no mismatch against the viewer port', mismatches, 0);
 
-// --- 2. the regions must exactly tile the visible image -------------------
 function tilingProblems(regions, size) {
   if (!regions) return ['null regions'];
   const problems = [];
@@ -179,7 +177,6 @@ check('tiling was exercised', tilingChecked, 3);
 // geometry did.
 check('tiling is complete and non-overlapping', tilingFailures, []);
 
-// --- 2b. a source tile must be as wide as its position stride implies ------
 //
 // Each source rectangle is a stored tile: `width` pixels of content with `Dt`
 // pixels of padding on either side, so within one stored row consecutive
@@ -235,7 +232,6 @@ for (let ci = 0; ci < tables.ctbl.length; ci++) {
 check('stored-tile stride was exercised', strideChecked > 0, true);
 check('every stored tile span matches its position stride', strideFailures, []);
 
-// --- 3. size gates ---------------------------------------------------------
 const scramble = selectScramble('pages/2s5rlNj9.jpg', tables);
 const impl = compileDescrambler(scramble.coordTable, scramble.pieceTable);
 check('small image is left alone', impl.regions(40, 40), [
@@ -243,7 +239,6 @@ check('small image is left alone', impl.regions(40, 40), [
 ]);
 check('small image display size is unchanged', impl.displaySize(40, 40), { width: 40, height: 40 });
 
-// --- 4. unsupported layouts are refused, not guessed -----------------------
 const numericError = (() => {
   try {
     compileDescrambler('8-8-' + 'A'.repeat(128), '8-8-' + 'A'.repeat(128));

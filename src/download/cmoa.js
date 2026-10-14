@@ -3,6 +3,7 @@ import fsp from 'node:fs/promises';
 import { openVolume, downloadVolume } from '../../vendor/cmoa/src/downloader.js';
 import { timed } from '../phase-timer.js';
 import { volumeFolder, writeVolumeMarker } from './volume-folder.js';
+import { existingVolume } from './existing-volume.js';
 import { dedupeBy, fetchText, mapLimit, reject } from '../series.js';
 
 const PROBE_CONCURRENCY = 4;
@@ -110,18 +111,23 @@ export async function downloadCmoa(task, ctx) {
     const volume = await timed(ctx.timer, 'handshake', () => openVolume(task.cid, retryOptions(ctx)));
     const title = volume.subtitle || task.cid;
 
-    ctx.progress?.update(task.key, { label: title, total: volume.pageCount, phase: 'downloading' });
-
     const folder = await volumeFolder(ctx, {
         title,
         id: task.cid,
         sample: task.sample === true,
     });
+    const existing = await existingVolume(ctx, {
+        store: 'cmoa', title, id: task.cid, sample: task.sample === true,
+        expectedPages: volume.pageCount, folder, checkRemote: !task.title,
+    });
+    if (existing) return existing;
+    ctx.progress?.update(task.key, { label: title, total: volume.pageCount, phase: 'downloading' });
     await fsp.mkdir(folder, { recursive: true });
 
     let done = 0;
     let rebuilt = 0;
     let failed = 0;
+    let bytes = 0;
 
     if (ctx.timer) {
         const inner = volume.fetchPage.bind(volume);
@@ -153,11 +159,14 @@ export async function downloadCmoa(task, ctx) {
             // Counting them says whether the renderer is doing work at all.
             if (event.descrambled) rebuilt += 1;
             done += 1;
-            ctx.progress?.update(task.key, { phase: 'downloading', done, total: event.total });
+            bytes += event.bytes || 0;
+            ctx.progress?.update(task.key, { phase: 'downloading', done, total: event.total, bytes });
         },
     });
 
-    await timed(ctx.timer, 'write', () => writeVolumeMarker(folder, { store: 'cmoa', id: task.cid, title }));
+    await timed(ctx.timer, 'write', () => writeVolumeMarker(folder, {
+        store: 'cmoa', id: task.cid, title, expectedPages: volume.pageCount,
+    }));
 
     return {
         store: 'cmoa',
@@ -224,7 +233,16 @@ export const platform = {
     id: 'cmoa',
     label: 'CMOA',
     lane: 'cpu',
-    workerKey: 'cmoa',
+    // CMOA is the one store whose own render pool takes a thread count, so its
+    // share of the shared CPU budget is handed back as `renderJobs`.
+    tuning: {
+        concurrency: 12,
+        contextKey: 'cmoaConcurrency',
+        cpuWeight: 1,
+        cpuSlot: 'renderJobs',
+        flag: { name: 'cm-concurrency', order: 1, help: 'CMOA pages in flight' },
+    },
+    hosts: ['cmoa.jp'],
     patterns: [
         { re: /cmoa\.jp\/title\/(\d+)\/vol\/(\d+)/i, kind: 'cmoa-title',
             build: (m, raw) => ({ kind: 'cmoa-title', titleId: m[1], volume: Number(m[2]), url: raw }) },

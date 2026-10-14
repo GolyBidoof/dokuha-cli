@@ -67,7 +67,6 @@ const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/
 const AUTH_PARAM_KEYS = ['hti', 'cfg', 'bid', 'uuid', 'pfCd', 'Policy', 'Signature', 'Key-Pair-Id'];
 const MAX_REDIRECTS = 6;
 
-// --- tiny cookie jar -------------------------------------------------------
 // Only needs to round-trip Set-Cookie -> Cookie across two hosts. Domain/path
 // scoping is deliberately not modelled; the probe sends every stored cookie to
 // both bookwalker.jp and viewer.bookwalker.jp, which is what the browser does
@@ -166,7 +165,6 @@ function generatedCr() {
     return String(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
 }
 
-// --- cr: the request token the loader hands out -----------------------------
 // The script served by /browserWebApi/03/getLoader defines c9P(), and the
 // viewer sends its return value as `cr`. The value therefore only exists in the
 // loader a session actually fetched, which is why it is read rather than
@@ -287,7 +285,6 @@ function seedJar(cookieHeader) {
     return jar;
 }
 
-// --- accepting a session from a browser -------------------------------------
 // Cookies arrive in whatever shape the browser was copied from, so all of these
 // are accepted and normalised into a single Cookie header:
 //   bwmember=x; SESSION=y          a raw Cookie header

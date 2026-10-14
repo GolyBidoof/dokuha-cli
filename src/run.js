@@ -3,6 +3,7 @@ import path from 'node:path';
 import fsp from 'node:fs/promises';
 
 import {
+    concurrencyContext,
     detectSource,
     isSeriesPage,
     KINDLE_UNLIMITED_LABEL,
@@ -14,14 +15,15 @@ import { LiveProgress } from './live-progress.js';
 import { createPhaseTimer, readPhases } from './phase-timer.js';
 import { normalizeStoreResult } from './store-result.js';
 import { allocateCpu } from './cpu-budget.js';
-import { DEFAULTS } from './options.js';
 import { defaultJobCount } from '../vendor/cmoa/src/render_pool.js';
+import { describeError } from './retry.js';
 import { createBookwalkerCarrier, prewarmBookwalker } from './download/bookwalker.js';
 import { platform as bookwalkerPlatform } from './download/bookwalker.js';
 import { platform as kindlePlatform } from './download/kindle.js';
-import { connectBridge, finalizeWithProgress, pushToBridge } from './bridge.js';
+import { existingVolume } from './download/existing-volume.js';
+import { connectBridge, finalizeWithProgress, pageFiles, pushToBridge, resumeExistingSession } from './bridge.js';
 import { createPool } from './serial.js';
-import { resolveDestination, describeDestinations } from '../vendor/ebookjapan/bridge.mjs';
+import { BridgeClient, discoverBridge, resolveDestination, describeDestinations } from '../vendor/ebookjapan/bridge.mjs';
 
 export async function buildTasks(positionals, config, { onRejected = () => {}, onNote = () => {}, onTask, fetchImpl, bwCarrier, kindleSession } = {}) {
     const tasks = [];
@@ -53,27 +55,62 @@ export async function buildTasks(positionals, config, { onRejected = () => {}, o
             try {
                 return await resolveSeries(entry.det, entry.input, { fetchImpl, config, kindleSession, onNote, onTask });
             } catch (error) {
-
-                return { tasks: [], rejected: [{ input: entry.input, error: error.message }], notes: [] };
+                // Held rather than rejected: --series has to tolerate mixed input, and a
+                // volume whose series walk fails is still a volume worth downloading. A
+                // series page that fails to walk is a real error and is reported below.
+                return { tasks: [], rejected: [], notes: [], failed: error.message };
             }
         };
         const settled = new Array(resolvable.length);
-        await Promise.all(resolvable
-            .map((entry, index) => ({ entry, index }))
-            .filter(({ entry }) => entry.det.kind !== 'kindle')
-            .map(async ({ entry, index }) => { settled[index] = await resolveAt(entry); }));
-        for (const [index, entry] of resolvable.entries()) {
-            if (entry.det.kind === 'kindle') settled[index] = await resolveAt(entry);
-        }
-
-        for (const resolved of settled) {
-
+        const publishResolved = (index) => {
+            const resolved = settled[index];
+            const { input, det } = resolvable[index];
             if (!resolved.streamed) {
                 for (const task of resolved.tasks) publish(task);
                 for (const note of resolved.notes || []) onNote(note);
             }
-            rejected.push(...resolved.rejected);
+            // A walk that threw is reported: discovery itself failed, and quietly
+            // downloading the one volume hides a nine-volume series behind a single book,
+            // which is exactly how a broken batch lookup looked like a working one. A walk
+            // that returned a rejection is different, because the resolver looked and said
+            // no, and the single-volume path is the authority on that volume.
+            if (resolved.failed) {
+                rejected.push({ input, error: resolved.failed });
+            } else if (!isSeriesPage(det) && !resolved.tasks.length) {
+                const platform = platformFor(det.kind);
+                publish({
+                    input,
+                    kind: det.kind,
+                    target: platform.volumeId(det) ?? det.url,
+                    cid: det.cid,
+                    asin: det.asin,
+                    url: det.url,
+                });
+            } else {
+                rejected.push(...resolved.rejected);
+            }
+        };
+        const resolveOne = async (index) => {
+            settled[index] = await resolveAt(resolvable[index]);
+            // Published the moment it is ready. Waiting for every source before publishing
+            // anything made a CMOA or BookWalker series, which resolves in one request,
+            // look queued behind a Kindle walk that takes one request per volume.
+            publishResolved(index);
+        };
+        const kindleIndexes = [];
+        const otherIndexes = [];
+        for (const [index, entry] of resolvable.entries()) {
+            (entry.det.kind === 'kindle' ? kindleIndexes : otherIndexes).push(index);
         }
+        await Promise.all([
+            ...otherIndexes.map((index) => resolveOne(index)),
+            // Kindle entries run one after another, because they share a single reader
+            // session and the walk is a request per volume, but they run alongside the
+            // other stores rather than ahead of them.
+            (async () => {
+                for (const index of kindleIndexes) await resolveOne(index);
+            })(),
+        ]);
 
         for (const r of rejected) onRejected(r);
         return { tasks, rejected };
@@ -137,12 +174,41 @@ async function downloadTask(task, ctx) {
     scoped.timer = createPhaseTimer();
 
     try {
+        const alreadyPresent = await existingVolume(scoped, {
+            store: task.kind,
+            title: task.title,
+            id: task.cid || task.asin || task.id || task.target,
+            sample: task.sample === true,
+            checkRemote: Boolean(ctx.bridge && task.title),
+            checkLocal: !ctx.bridge,
+        });
+        if (alreadyPresent) {
+            Object.assign(record, normalizeStoreResult({ ...alreadyPresent, store: task.kind }, task), {
+                key: task.key,
+                ok: true,
+                note: `already present at ${alreadyPresent.existingDestination.method}`,
+            });
+            scoped.progress?.note?.(`  ${task.title}: ${record.note}; skipping download and OCR`);
+            record.seconds = (performance.now() - started) / 1000;
+            record.phases = readPhases(scoped.timer);
+            return { record, scoped };
+        }
         Object.assign(record, normalizeStoreResult(await ctx.callAdapter(task, scoped), task));
+        if (record.existingDestination) {
+            record.note = `already present at ${record.existingDestination.method}`;
+            scoped.progress?.note?.(`  ${record.title}: ${record.note}; skipping download and OCR`);
+        }
     } catch (error) {
         if (error?.code === 'KINDLE_KU_UNAVAILABLE' && task.kuCandidate) {
-            record.skipped = true;
-            record.ok = true;
-            record.error = '';
+            // `skipped` is a page count everywhere else, so a skip that downloaded
+            // nothing reports zero pages and says why under its own key.
+            Object.assign(record, normalizeStoreResult({
+                ...record,
+                skipped: Number(record.totalPages) || 0,
+                kuUnavailable: true,
+                ok: true,
+                error: '',
+            }, task));
             record.seconds = (performance.now() - started) / 1000;
             record.phases = readPhases(scoped.timer);
             record.note = `skipped ${task.target}: ${String(error.message).split('\n')[0]}`;
@@ -174,7 +240,36 @@ async function downloadTask(task, ctx) {
  * Never throws: a bridge failure is a failed volume, not a failed run.
  */
 async function bridgeStage(record, ctx) {
-    if (!ctx.bridge) return record;
+    if (record.existingDestination) return record;
+    if (!ctx.bridge) {
+        if (!ctx.resumeBridge || !record.ok || !record.title || !record.folder) return record;
+        try {
+            const { client } = ctx.resumeBridge;
+            const listed = await client.sessions();
+            const normalize = (value) => String(value || '').normalize('NFKC').trim().toLocaleLowerCase();
+            const session = (listed?.sessions || []).find((item) =>
+                normalize(item.title) === normalize(record.title)
+                || normalize(item.safe_title) === normalize(record.title));
+            if (!session) return record;
+            const destInfo = await resolveDestination(client, {
+                dest: ctx.config.dest || null,
+                folder: ctx.config.destFolder || null,
+            });
+            record.mokuro = await resumeExistingSession(client, destInfo, record, await pageFiles(record.folder), {
+                alreadyHandled: true,
+                existingSession: session,
+                state: 'existing bridge session found (resume-only mode)',
+            }, {
+                progress: ctx.progress,
+                overwrite: ctx.config.overwrite,
+                ocrWaitMs: ctx.config.ocrWaitSeconds * 1000,
+            });
+        } catch (error) {
+            record.mokuro = { error: error.message, resumedExisting: true };
+            record.ok = false;
+        }
+        return record;
+    }
 
     if (record.mokuro?.deferredFinalize) {
         try {
@@ -236,7 +331,17 @@ export async function run(positionals, config, io = {}) {
 
     const outDir = path.resolve(config.out);
     const say = (line) => {
-        if (!config.quiet && !config.json) err.write(line.endsWith('\n') ? line : `${line}\n`);
+        if (config.quiet || config.json) return;
+        // Route through the progress block so it can move its own anchor. Writing to
+        // the stream directly shifts the block down a row without telling it, and the
+        // next redraw then lands a row too high: it overwrites the line above and
+        // leaves the block's last row stale. That is how one volume came to appear
+        // several times with the progress bar drawn on top of the rows.
+        if (progress) {
+            progress.note(line);
+            return;
+        }
+        err.write(line.endsWith('\n') ? line : `${line}\n`);
     };
 
     const bwCarrier = createBookwalkerCarrier();
@@ -246,12 +351,25 @@ export async function run(positionals, config, io = {}) {
 
     const streaming = !config.dryRun && !config.flat;
 
+    // Every discovered volume starts at once. The promise to the user is "as fast
+    // as this machine allows", and the thing that oversubscribing actually hurts --
+    // CPU-bound page rebuilding -- is already bounded by `cpu-budget.js`, which
+    // divides one budget across the stores that are running. `--parallel N` is the
+    // escape hatch for a constrained machine or a store that is throttling.
+    // Computed here, before any task can be published: `addTask` needs the resolved
+    // width, not the raw flag, or a batch starts no work at all.
+    const cores = defaultJobCount();
+    const parallel = config.parallel ?? Infinity;
+    const bridgeParallel = config.bridgeParallel ?? parallel;
+
     const tasks = [];
     const cpuLane = [];
     const netLane = [];
     const lanes = [cpuLane, netLane];
     const cursors = [0, 0];
     const waiting = [];
+    const unlimitedPending = [];
+    let unlimitedDownloadDispatch = null;
 
     let rejected = [];
     let buildDone = false;
@@ -269,19 +387,24 @@ export async function run(positionals, config, io = {}) {
     const addTask = (task) => {
 
         if (!task.key) task.key = `${task.kind}:${task.target}`;
+        const index = tasks.length;
         tasks.push(task);
-        (laneOf(task) === 'cpu' ? cpuLane : netLane).push(tasks.length - 1);
+        (laneOf(task) === 'cpu' ? cpuLane : netLane).push(index);
         progress?.add(task.key, {
 
             tag: task.kuCandidate ? KINDLE_UNLIMITED_LABEL : (platformFor(task.kind)?.label || '?'),
             label: rowLabel(task),
         });
         notify();
+        if (parallel === Infinity) {
+            if (unlimitedDownloadDispatch) unlimitedDownloadDispatch(index, task);
+            else unlimitedPending.push({ index, task });
+        }
     };
 
     if (kindleSession && !kindleSession.cookie) {
-        err.write('Kindle needs signed-in read.amazon.co.jp cookies, and none were found.\n');
-        err.write(`  ${kindlePlatform.session.hint(kindleSession)}\n`);
+        err.write('Kindle needs signed-in read.amazon.co.jp cookies, and none were found.\n\n');
+        err.write(`${kindlePlatform.session.howTo}\n`);
         return { code: 2, summary: null };
     }
 
@@ -296,9 +419,24 @@ export async function run(positionals, config, io = {}) {
         say('note: --zip only applies to BookWalker; other stores write their pages unchanged');
     }
 
-    if (!config.dryRun) await fsp.mkdir(outDir, { recursive: true });
+    if (!config.dryRun) {
+        try {
+            await fsp.mkdir(outDir, { recursive: true });
+        } catch (error) {
+            err.write(`cannot write to ${outDir}\n`);
+            err.write(`  ${describeError(error)}\n`);
+            err.write('  Pick another folder with --out DIR, or fix its permissions.\n');
+            return { code: 2, summary: null };
+        }
+    }
 
-    const build = buildTasks(positionals, config, { onNote: say, onTask: addTask, bwCarrier, kindleSession })
+    const build = buildTasks(positionals, config, {
+        onNote: say,
+        onTask: addTask,
+        fetchImpl: io.fetchImpl || globalThis.fetch,
+        bwCarrier,
+        kindleSession,
+    })
         .then((built) => { rejected = built.rejected; })
         .catch((error) => { buildError = error; })
         .finally(() => { buildDone = true; notify(); });
@@ -314,13 +452,7 @@ export async function run(positionals, config, io = {}) {
         const width = Math.max(11, ...tasks.map((t) => kindOf(t).length));
         for (const t of tasks) out.write(`${kindOf(t).padEnd(width)}  ${t.target}\n`);
         for (const r of rejected) out.write(`${'unsupported'.padEnd(width)}  ${r.input}  (${r.error})\n`);
-        return { code: 0, summary: null };
-    }
-
-    if (!streaming && !tasks.length) {
-        err.write('no supported volume URLs given\n');
-        for (const r of rejected) err.write(`  ${r.input}: ${r.error}\n`);
-        return { code: 2, summary: null };
+        return { code: tasks.length ? 0 : 2, summary: null };
     }
 
     if (config.flat && tasks.length > 1) {
@@ -329,48 +461,106 @@ export async function run(positionals, config, io = {}) {
             + 'each other. Drop --flat to get one folder per volume.');
     }
 
-    const cores = defaultJobCount();
-    // Starting every volume at once was measured worse than running them one after
-    // another -- 219 s against 190 s on a mixed ten-volume batch -- because a dozen
-    // stores contending for the same disk and the same cores is slower than a few.
-    // The default is therefore bounded rather than "all of them": some overlap for
-    // the network while others render, without thrashing. An explicit `--parallel`
-    // still means exactly what it says.
-    const parallel = config.parallel ?? Math.max(1, Math.min(DEFAULTS.parallelCap, Math.floor(cores / 4)));
-
-    // The bridge stage gets its own worker pool. Defaulting to the same width keeps
-    // the bridge as loaded as it was when a download slot was spent on OCR, while the
-    // download pool carries on -- which is the entire point of the split. The floor of
-    // one matters: with no bridge worker the queue fills and every download worker
-    // waits on it forever.
-    const bridgeParallel = Math.max(1, config.bridgeParallel ?? parallel);
-
     // Counts every task discovered for that store, whichever lane it landed in and
     // whether or not it has finished -- `tasks` is only ever appended to, so a store
     // that has finished a volume still holds the share it was counted for. Which
-    // stores are counted at all is decided by `workerKey`, not by lane: BookWalker
-    // runs on the net lane and still takes normalize threads, and the three stores
-    // with no workerKey are left out of `active` entirely.
+    // stores are counted at all is decided by the descriptor's `cpuSlot`: BookWalker
+    // runs on the net lane and still takes normalize threads, and a store that
+    // declares no slot is left out of `active` entirely.
     const kindCount = (kind) => tasks.reduce((n, task) => n + (task.kind === kind ? 1 : 0), 0);
     const sizing = () => allocateCpu({
         cores,
         active: Object.fromEntries(PLATFORMS
-            .filter((entry) => entry.workerKey)
-            .map((entry) => [entry.workerKey, kindCount(entry.id)])),
+            .filter((entry) => entry.tuning?.cpuSlot)
+            .map((entry) => [entry.id, kindCount(entry.id)])),
         renderJobs: config.jobs ?? null,
     });
 
     let bridge = null;
+    let resumeBridge = null;
+    let bridgeMonitor = null;
+    let destinationCheckDisabled = false;
     if (config.mokuro) {
         try {
             bridge = await (io.connectBridge || connectBridge)(config, { resolveDestination, describeDestinations });
             say(`bridge ${bridge.baseUrl} (mokuro ${bridge.health.mokuro_installed ? 'ready' : 'MISSING'})`);
             say(`destination ${bridge.destInfo.method}`);
+            // Tell the display whether an upload is part of this run. Without it the
+            // bar cannot tell "assembling the archive before sending it" from "no
+            // destination at all", which is why the cyan band never appeared while
+            // the rows were already showing the volume being assembled.
+            if (progress) progress.uploadExpected = bridge.destInfo.method !== 'local';
+            if (progress?.tty && bridge.client.sessions && bridge.client.queue) {
+                let polling = false;
+                const pollBridge = async () => {
+                    if (polling) return;
+                    polling = true;
+                    try {
+                        const [sessions, queue] = await Promise.all([
+                            bridge.client.sessions(),
+                            bridge.client.queue(),
+                        ]);
+                        progress.updateBridgeStatus({
+                            worker: queue?.worker?.state || 'unknown',
+                            processing: Number(queue?.processing_depth) || 0,
+                            pending: Number(queue?.queue_depth) || 0,
+                            activeUploads: (sessions?.sessions || []).filter((session) => session.upload).length,
+                        });
+                        const byId = new Map((queue?.per_session || []).map((entry) => [entry.session_id, entry]));
+                        for (const session of sessions?.sessions || []) {
+                            const volume = progress.volumes.find((item) =>
+                                String(item.label).normalize('NFKC').trim().toLocaleLowerCase()
+                                    === String(session.title).normalize('NFKC').trim().toLocaleLowerCase());
+                            if (!volume || volume.phase === 'done' || volume.phase === 'error') continue;
+                            const counts = byId.get(session.session_id);
+                            const processingCount = Number(counts?.processing) || 0;
+                            const pendingCount = Number(session.pages_ocr_pending) || 0;
+                            const state = session.source_ingesting
+                                ? 'bridge ingesting'
+                                : session.upload
+                                    ? 'bridge uploading'
+                                    : processingCount
+                                        ? `bridge OCR processing ${processingCount}, ${pendingCount} pending`
+                                        : pendingCount
+                                            ? `bridge OCR queued ${pendingCount}`
+                                            : Number(session.pages_ocr_done) > 0
+                                                ? `bridge OCR complete (${session.pages_ocr_done}); session active`
+                                                : 'bridge session active; no OCR queued';
+                            progress.update(volume.key, {
+                                bridgeState: state,
+                                bridgeOcrDone: Number(session.pages_ocr_done) || 0,
+                                bridgeOcrTotal: Number(session.pages_received) || 0,
+                                bridgeOcrPending: pendingCount,
+                                bridgeOcrProcessing: processingCount,
+                            });
+                        }
+                    } catch { /* bridge status is observational; keep the run alive */ }
+                    finally { polling = false; }
+                };
+                void pollBridge();
+                bridgeMonitor = setInterval(() => { void pollBridge(); }, 2000);
+                bridgeMonitor.unref?.();
+            }
         } catch (error) {
             err.write(`${error.message}\n`);
             progress?.stop?.();
             return { code: 1, summary: null };
         }
+    } else if (!config.dryRun) {
+        // `--no-mokuro` prevents new OCR submissions, but a bridge session from
+        // an interrupted earlier run may still be active. Keep resume-only mode
+        // observational until a matching title is found in bridgeStage.
+        try {
+            const found = await discoverBridge(config.bridge);
+            if (found) {
+                const client = new BridgeClient(found.baseUrl);
+                const listed = await client.sessions();
+                if (Number(listed?.count) > 0) {
+                    resumeBridge = { client, baseUrl: found.baseUrl, health: found.health };
+                    say(`bridge ${found.baseUrl} (checking existing sessions only; no new OCR submissions)`);
+                }
+            }
+        } catch { /* no bridge session to resume; local downloads can proceed */ }
     }
 
     const ctx = {
@@ -378,14 +568,42 @@ export async function run(positionals, config, io = {}) {
         titleDir: config.titleDir,
         progress,
         bridge,
+        resumeBridge,
+        // Created here, not lazily in the Kindle adapter, because `downloadTask` hands
+        // each volume an `Object.create(ctx)`. An adapter that assigned this itself
+        // would write it onto the per-volume child, and the run's own copy would stay
+        // undefined, which is why the grouped return warning never printed.
+        kindleUnreturned: new Set(),
+        // With OCR and upload still to run, a return waits in the background instead of
+        // holding the volume. On a plain download there is nothing to overlap with, so
+        // it stays in the foreground where its result is known before the volume ends.
+        kindleReturnInBackground: Boolean(config.mokuro),
+        destinationCheck: bridge?.client?.destinationCheck
+            ? async (title) => {
+                if (destinationCheckDisabled) return null;
+                try {
+                    return await bridge.client.destinationCheck(title, {
+                        method: bridge.destInfo.method,
+                        localDir: bridge.destInfo.params?.localDir || null,
+                    });
+                } catch (error) {
+                    if (error?.status === 404) destinationCheckDisabled = true;
+                    if (!destinationCheckDisabled) {
+                        say(`  destination check unavailable for ${title}: ${error.message}; continuing`);
+                    }
+                    return null;
+                }
+            }
+            : null,
         config,
         bwCarrier,
         userAgent: USER_AGENT,
 
-        concurrency: config.ebConcurrency,
-        cmoaConcurrency: config.cmConcurrency,
-        ebConcurrency: config.ebConcurrency,
-        bwConcurrency: config.bwConcurrency,
+        // The shared --concurrency override, and one field per store that declares
+        // a concurrency on its descriptor (`ctx.cmoaConcurrency`, and so on). The
+        // adapters read their own field; nothing here is keyed by store name.
+        concurrency: config.concurrency,
+        ...concurrencyContext(config, PLATFORMS),
 
         get jobs() { return sizing().renderJobs; },
         get normalizeWorkers() { return sizing().normalizeWorkers; },
@@ -402,7 +620,6 @@ export async function run(positionals, config, io = {}) {
         retries: config.retries,
 
         kindleSession,
-        kdlConcurrency: config.kdlConcurrency,
 
         kindleUnlimited: { available: null, csrf: null, offers: new Map() },
         // The store dispatch, injectable so the two-stage scheduler can be tested
@@ -414,7 +631,6 @@ export async function run(positionals, config, io = {}) {
         // a mutation of a shared object survives. Kindle's walk seeds itself from it
         // so the shrink ladder runs once per run instead of once per volume.
         kindleBatch: { size: 0 },
-        kmConcurrency: config.kmConcurrency,
     };
 
     const started = performance.now();
@@ -433,22 +649,84 @@ export async function run(positionals, config, io = {}) {
         });
     };
 
-    // The queue between the two stages. Bounded so a fast network cannot run the
-    // whole library onto disk while one OCR worker catches up; a download worker
-    // that finds it full waits for a bridge worker to take a job.
+    // Keep ordinary volume batches bounded so a fast network cannot fill the disk
+    // while one OCR worker catches up. In --series mode, keep downloading the
+    // requested series while OCR lags: the separate download and bridge limits
+    // still cap active work, while this queue holds the completed volumes.
     const bridgeQueue = [];
     const bridgeWaiting = [];
+    const downloadWaiting = [];
     let downloadsDone = false;
     let bridgeQueuePeak = 0;
-    const bridgeQueueMax = Math.max(1, parallel * 2);
+    const bridgeQueueMax = config.series || parallel === Infinity
+        ? Infinity
+        : Math.max(1, parallel * 2);
 
     const notifyBridge = () => { while (bridgeWaiting.length) bridgeWaiting.shift()(); };
     const waitForBridge = () => new Promise((resolve) => bridgeWaiting.push(resolve));
+    const notifyDownload = () => { while (downloadWaiting.length) downloadWaiting.shift()(); };
+    const waitForDownload = () => new Promise((resolve) => downloadWaiting.push(resolve));
 
     // Both lanes draw from one gate, so --parallel N really is N volumes in
     // flight. Per-lane pools of `parallel` each meant 2N once two stores were
     // mixed, which is what the help text and the reported summary both deny.
     const inFlight = createPool(parallel);
+    const unlimitedDownloadWork = new Set();
+    const unlimitedBridgeWork = new Set();
+
+    const enqueueBridge = async (index, task, record) => {
+        if (!ctx.bridge && !ctx.resumeBridge) {
+            finish(index, task, record);
+            return;
+        }
+        if (!ctx.bridge && ctx.resumeBridge) {
+            try { record = await bridgeStage(record, ctx); }
+            catch (error) { record = { ...record, ok: false, mokuro: { error: error.message } }; }
+            finish(index, task, record);
+            return;
+        }
+        if (bridgeParallel === Infinity) {
+            const work = Promise.resolve().then(async () => {
+                try { record = await bridgeStage(record, ctx); }
+                catch (error) { record = { ...record, ok: false, mokuro: { error: error.message } }; }
+                finish(index, task, record);
+            }).finally(() => unlimitedBridgeWork.delete(work));
+            unlimitedBridgeWork.add(work);
+            return;
+        }
+        while (bridgeQueue.length >= bridgeQueueMax) {
+            await waitForDownload();
+            if (downloadsDone) return;
+        }
+        bridgeQueue.push({ index, task, record });
+        bridgeQueuePeak = Math.max(bridgeQueuePeak, bridgeQueue.length);
+        notifyBridge();
+    };
+
+    const downloadOne = async (index, task) => {
+        let record;
+        try {
+            ({ record } = await inFlight(() => downloadTask(task, ctx)));
+        } catch (error) {
+            finish(index, task, {
+                input: task.input,
+                kind: task.kind,
+                target: task.target,
+                key: task.key,
+                ok: false,
+                error: error.message,
+            });
+            return;
+        }
+        await enqueueBridge(index, task, record);
+    };
+
+    unlimitedDownloadDispatch = (index, task) => {
+        const work = Promise.resolve().then(() => downloadOne(index, task))
+            .finally(() => unlimitedDownloadWork.delete(work));
+        unlimitedDownloadWork.add(work);
+    };
+    for (const pending of unlimitedPending.splice(0)) unlimitedDownloadDispatch(pending.index, pending.task);
 
     const laneWorker = async (laneIndex) => {
         const lane = lanes[laneIndex];
@@ -479,15 +757,7 @@ export async function run(positionals, config, io = {}) {
                 continue;
             }
 
-            if (!ctx.bridge) {
-                finish(index, task, record);
-                continue;
-            }
-
-            while (bridgeQueue.length >= bridgeQueueMax) await waitForBridge();
-            bridgeQueue.push({ index, task, record });
-            bridgeQueuePeak = Math.max(bridgeQueuePeak, bridgeQueue.length);
-            notifyBridge();
+            await enqueueBridge(index, task, record);
         }
     };
 
@@ -495,7 +765,7 @@ export async function run(positionals, config, io = {}) {
         for (;;) {
             const job = bridgeQueue.shift();
             if (job) {
-                notifyBridge();
+                notifyDownload();
                 let record = job.record;
                 try {
                     record = await bridgeStage(record, ctx);
@@ -511,61 +781,146 @@ export async function run(positionals, config, io = {}) {
     };
 
     const laneWork = Promise.all(lanes.flatMap((lane, laneIndex) => (
-        Array.from({ length: parallel }, () => laneWorker(laneIndex))
-    ))).then(() => {
+        parallel === Infinity ? [] : Array.from({ length: parallel }, () => laneWorker(laneIndex))
+    ))).then(async () => {
+        if (parallel === Infinity) {
+            await build;
+            while (unlimitedDownloadWork.size) await Promise.all([...unlimitedDownloadWork]);
+        }
         downloadsDone = true;
+        notifyDownload();
         notifyBridge();
     });
 
-    const bridgeWork = ctx.bridge
-        ? Promise.all(Array.from({ length: bridgeParallel }, () => bridgeWorker()))
-        : Promise.resolve();
+    const bridgeWork = !ctx.bridge
+        ? Promise.resolve()
+        : bridgeParallel === Infinity
+            ? laneWork.then(async () => {
+                while (unlimitedBridgeWork.size) await Promise.all([...unlimitedBridgeWork]);
+            })
+            : Promise.all(Array.from({ length: bridgeParallel }, () => bridgeWorker()));
 
     try {
         await Promise.all([build, laneWork, bridgeWork]);
     } finally {
+        if (bridgeMonitor) clearInterval(bridgeMonitor);
+        // Returns that were sent to the background settle before the run reports, so
+        // the grouped warning below covers finished work rather than a snapshot of
+        // returns still retrying. Nothing else waits on them.
+        if (ctx.kindleReturnWork?.size) {
+            await Promise.allSettled([...ctx.kindleReturnWork]);
+        }
+        // Resumed bridge sessions, grouped for the same reason as the returns: every
+        // volume of a series repeats the same notice, and one line each buries the run.
+        const resumed = ctx.bridgeResume;
+        if (resumed?.size) {
+            const processing = resumed.get('processing')?.length || 0;
+            const finished = resumed.get('finished')?.length || 0;
+            const unknown = resumed.get('unknown')?.length || 0;
+            const total = processing + finished + unknown;
+            const parts = [];
+            if (processing) parts.push(`${processing} the bridge is still working on`);
+            if (finished) parts.push(`${finished} already finished and cleaned up`);
+            if (unknown) parts.push(`${unknown} with no live session left to check`);
+            const line = `  ${total} volume${total === 1 ? '' : 's'} already had a bridge session from an earlier run, `
+                + `so ${total === 1 ? 'its' : 'their'} pages were not sent again (${parts.join(', ')}). `
+                + 'That is the run resuming where it left off, not a failure.';
+            if (progress) progress.note(line);
+            else err.write(`${line}\n`);
+        }
+        // One grouped line for the Kindle return path rather than one per volume.
+        // The loans are what a user has to act on, so the run names every ASIN in a
+        // single place instead of scattering the same paragraph through the output.
+        const unreturned = ctx.kindleUnreturned;
+        if (unreturned && unreturned.size) {
+            const list = [...unreturned].join(', ');
+            const line = unreturned.size === 1
+                ? `  ${list}: downloaded, but its Kindle loan could not be returned, so it may still be open. Free the slot at https://www.amazon.co.jp/your-books`
+                : `  ${unreturned.size} Kindle loans could not be returned: ${list}\n  Free the slots at https://www.amazon.co.jp/your-books`;
+            if (progress) progress.note(line);
+            else err.write(`${line}\n`);
+        }
         progress?.done();
     }
 
     if (buildError) throw buildError;
 
-    if (streaming && !tasks.length) {
+    // Nothing resolvable is a usage error whether or not this was a dry run; the
+    // exit code must not change because the run was only asked to list its work.
+    if (!tasks.length) {
         err.write('no supported volume URLs given\n');
         for (const r of rejected) err.write(`  ${r.input}: ${r.error}\n`);
         return { code: 2, summary: null };
     }
 
     const seconds = (performance.now() - started) / 1000;
+    // The download stage runs in parallel, so its wall time is the slowest single
+    // volume, not the sum. With --mokuro the total is usually much larger, and it
+    // is OCR and upload that own the difference -- worth saying out loud so a slow
+    // run is not mistaken for slow downloading.
+    const downloadSeconds = Math.max(0, ...results.map((r) => Number(r?.seconds) || 0));
     const summary = {
         volumes: tasks.length,
         succeeded: results.filter((r) => r?.ok).length,
-        failed: results.filter((r) => r && !r.ok).length,
+        // A discovered volume that never produced a result is a failure, not a
+        // silent success. Counting only records that exist let a batch that started
+        // no work at all report "0/18 volumes" and exit 0.
+        failed: tasks.length - results.filter((r) => r?.ok).length,
         unsupported: rejected,
         pages: results.reduce((a, r) => a + (r?.downloaded || 0), 0),
+        skippedPages: results.reduce((a, r) => a + (r?.skipped || 0), 0),
+        alreadyPresent: results.filter((r) => r?.existingDestination).length,
         bytes: results.reduce((a, r) => a + (r?.bytes || 0), 0),
         elapsedSeconds: +seconds.toFixed(2),
+        downloadSeconds: +downloadSeconds.toFixed(2),
         outDir,
-        parallel,
+        parallel: parallel === Infinity ? 'unlimited' : parallel,
         mokuro: config.mokuro
             ? {
                 bridge: bridge?.baseUrl ?? null,
                 destination: bridge?.destInfo.method ?? null,
                 volumes: results.filter((r) => r?.mokuro).length,
-                parallel: bridgeParallel,
+                parallel: bridgeParallel === Infinity ? 'unlimited' : bridgeParallel,
                 queuePeak: bridgeQueuePeak,
                 ingestedFromFolder: results.filter((r) => r?.mokuro?.ingest === 'folder').length,
             }
             : null,
-        results: results.map((r) => r || { ok: false, error: 'not attempted' }),
+        results: results.map((r) => r || { ok: false, error: 'did not start' }),
     };
 
     if (config.json) {
         out.write(`${JSON.stringify(summary, null, 2)}\n`);
     } else if (!config.quiet) {
         for (const r of summary.results) {
-            if (!r.ok) err.write(`  FAILED ${r.title || r.target}: ${r.error || `${r.failed} page(s) failed`}\n`);
+            const name = r.title || r.target;
+            if (r.ok && r.existingDestination) {
+                err.write(`  already downloaded  ${name}\n`);
+            }
+            if (!r.ok) {
+                const reason = r.error || `${r.failed} page(s) could not be downloaded`;
+                err.write(`  failed  ${name}\n            ${reason}\n`);
+            }
         }
-        err.write(`\n${summary.succeeded}/${summary.volumes} volumes, ${summary.pages} pages, ${seconds.toFixed(1)}s\n`);
+
+        // Plain-language close: what happened, not a ratio to decode.
+        const bits = [`${summary.succeeded} of ${summary.volumes} volume${summary.volumes === 1 ? '' : 's'} downloaded`];
+        if (summary.pages) bits.push(`${summary.pages} pages`);
+        if (summary.alreadyPresent) bits.push(`${summary.alreadyPresent} already there`);
+        if (summary.failed) bits.push(`${summary.failed} failed`);
+        if (summary.unsupported.length) {
+            bits.push(`${summary.unsupported.length} URL${summary.unsupported.length === 1 ? '' : 's'} not recognised`);
+        }
+        err.write(`\n${bits.join(', ')} in ${seconds.toFixed(1)}s\n`);
+        if (summary.mokuro && summary.succeeded) {
+            err.write(`  downloads were finished in ${downloadSeconds.toFixed(0)}s`
+                + '; OCR and upload are the rest of the time\n');
+        }
+        if (!summary.succeeded && summary.volumes) {
+            err.write('Nothing was downloaded. The reasons are listed above.\n');
+        }
+        if (summary.failed) {
+            err.write('Re-run the same command: finished pages are kept and only the gaps are fetched.\n');
+        }
     }
 
     return { code: summary.failed ? 1 : 0, summary };

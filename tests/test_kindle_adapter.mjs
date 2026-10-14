@@ -353,9 +353,27 @@ globalThis.fetch = async (url, init = {}) => {
             ? { asin, title: 'テスト漫画', seriesSize: 3, seriesType: 'VOLUMES' }
             : { asin, title: `テスト漫画 ${asin}`, seriesSize: 0, seriesType: 'UNKNOWN' }), { status: 200 });
     }
+
+    // ---- the store's series list ----
+    // Discovery is one request for the whole series, so the stub answers the store
+    // endpoints the resolver uses instead of walking the reader one volume at a time.
+    if (parsed.hostname === 'www.amazon.co.jp' && parsed.pathname.startsWith('/kindle-dbs/product/')) {
+        const asin = decodeURIComponent(parsed.pathname.split('/').pop() || '');
+        return new Response(`<div data-asin="${asin}" data-entity-type="collection"></div>`,
+            { status: 200, headers: { 'content-type': 'text/html' } });
+    }
+    if (parsed.hostname === 'www.amazon.co.jp' && parsed.pathname === '/kindle-dbs/productPage/ajax/seriesAsinList') {
+        const entry = parsed.searchParams.get('asin') || ASIN;
+        const step = (at) => service.nextInSeries?.[at] ?? NEXT_IN_SERIES[at];
+        const order = [entry];
+        for (let at = step(entry); at && !order.includes(at); at = step(at)) order.push(at);
+        return new Response(order.map((a) => `<a data-asin="${a}"></a>`).join(''),
+            { status: 200, headers: { 'content-type': 'text/html' } });
+    }
     if (parsed.hostname === 'read.amazon.co.jp' && parsed.pathname === '/api/manga/open-book') {
         const hopFrom = parsed.searchParams.get('asin');
-        const next = service.nextInSeries?.[hopFrom] ?? NEXT_IN_SERIES[hopFrom];
+        const wantsNext = parsed.searchParams.get('openNextBook') === 'true';
+        const next = wantsNext ? (service.nextInSeries?.[hopFrom] ?? NEXT_IN_SERIES[hopFrom]) : hopFrom;
         if (!next) return new Response('', { status: 204 });
         // Every volume after the entry one is reported SAMPLE, which is what the
         // reader says for an unborrowed KU volume and for one this account cannot

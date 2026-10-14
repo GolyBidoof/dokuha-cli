@@ -1,13 +1,6 @@
 /**
  * One retry policy, and one way to describe why a request failed.
  *
- * Before this, every place that retried invented its own rules. Kindle retried
- * page fetches six times and control-plane calls not at all; ebookjapan retried
- * four times inside its vendored engine and again in a refresh pass; BookWalker
- * had an internal loop; CMOA forwarded a budget into the engine; k-manga counted
- * reconnects separately. The budgets still differ -- they are tuned per store -- but
- * the mechanics and the diagnostics no longer do.
- *
  * The vendored engines keep their own loops. They are third-party code driven as
  * a unit, and reaching into them to replace a retry would be a larger deviation
  * than the problem justifies; `vendor/README.md` records what they do.

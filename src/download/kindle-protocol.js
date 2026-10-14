@@ -485,16 +485,62 @@ export function kindleBorrowResult(payload) {
     };
 }
 
-export function kindleLibraryQuery() {
+export function kindleLibraryQuery(after = '') {
+    // These parameters match the ones the site's own Your Books page sends, which
+    // matters more than it looks: the reader API answers HTTP 200 with a GraphQL
+    // errors array when a parameter is wrong, so a bad sort field or a missing
+    // page size reads as an empty library rather than a failure. That is what made
+    // every Kindle Unlimited return report "the library does not list it".
+    // ACQUISITION_DATE is the site's sort field, first is the page size, and
+    // groupBySeries is deliberately left off so each volume is its own node: the
+    // series form returns one node per series and buries the other volumes.
+    const cursor = JSON.stringify(String(after || ''));
     return {
         query: 'query ccGetCustomerLibraryBooks { getCustomerLibrary { books('
-            + 'sortBy: {sortField: RECENCY, sortOrder: DESCENDING}, '
+            + `after: ${cursor}, first: 30, `
+            + 'sortBy: {sortField: ACQUISITION_DATE, sortOrder: DESCENDING}, '
             + 'selectionCriteria: {tags: [], query: ""}) { '
             + 'pageInfo {hasNextPage endCursor} totalCount {number relation} '
             + 'edges { node { asin acquisitionId relationshipType relationshipSubType __typename '
 
             + '... on CustomerLibraryBorrowedSingleBookNode { activeBorrow } }}}}}',
     };
+}
+
+// GraphQL reports a rejected query inside an HTTP 200 body, so the errors array
+// has to be read on purpose. Without this a wrong field name or enum is
+// indistinguishable from a library that genuinely holds nothing.
+export function kindleGraphQLError(payload) {
+    let data = payload;
+    if (typeof data === 'string') {
+        try {
+            data = JSON.parse(data);
+        } catch {
+            return 'the response was not JSON';
+        }
+    }
+    const errors = data?.errors;
+    if (Array.isArray(errors) && errors.length) {
+        return String(errors[0]?.message || 'unspecified GraphQL error');
+    }
+    return null;
+}
+
+// The library is paginated, so the caller has to follow this cursor or every loan
+// past the first page looks absent.
+export function kindleLibraryCursor(payload) {
+    let data = payload;
+    if (typeof data === 'string') {
+        try {
+            data = JSON.parse(data);
+        } catch {
+            return null;
+        }
+    }
+    const pageInfo = data?.data?.getCustomerLibrary?.books?.pageInfo;
+    if (!pageInfo || pageInfo.hasNextPage !== true) return null;
+    const cursor = pageInfo.endCursor;
+    return cursor ? String(cursor) : null;
 }
 
 export function kindleLoansFromLibrary(payload) {

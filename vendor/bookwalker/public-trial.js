@@ -370,7 +370,7 @@ async function normalizePage(data, job, manifest) {
 
 async function pushBridgePage(bridge, sessionId, page, title, options) {
     if (!bridge || !sessionId) return;
-    const name = `page_${String(page.index).padStart(4, '0')}.jpg`;
+    const name = options.name || `page_${String(page.index).padStart(4, '0')}.jpg`;
     // A page reused from disk carries no body -- it was never held in memory, only
     // measured -- but the bridge still has to be handed the bytes in order to OCR
     // it. Sending the null body straight through made every upload of a resumed
@@ -506,7 +506,18 @@ async function runPublicTrialJob(options = {}) {
     // opened whole. It also makes the per-page resume below possible at all: the
     // archive path has no way to tell which pages already arrived.
     const writePages = options.pagesAsFiles === true;
-    const pageFileName = (index) => `page-${String(index).padStart(4, '0')}.jpg`;
+    // VENDORED DEVIATION (fourth): `options.pageName(index, source, extension)`
+    // hands the page name to the caller, which has to agree on it across the
+    // written file, the bridge upload and the ZIP entry or a resume looks for a
+    // name that was never written. The default is the historical
+    // `page-NNNN.jpg` for files and `page_NNNN.jpg` for the bridge, so an
+    // unchanged caller behaves exactly as before.
+    const writePageName = (index, source) => (typeof options.pageName === 'function'
+        ? options.pageName(index, source, 'jpg')
+        : `page-${String(index).padStart(4, '0')}.jpg`);
+    const bridgePageName = (index, source) => (typeof options.pageName === 'function'
+        ? options.pageName(index, source, 'jpg')
+        : `page_${String(index).padStart(4, '0')}.jpg`);
     let reused = 0;
     const pages = [];
     let next = 0;
@@ -531,10 +542,10 @@ async function runPublicTrialJob(options = {}) {
             // left with a null body because it never needs to be held in memory.
             if (writePages && !options.force) {
                 try {
-                    const onDiskPath = path.join(outputDir, pageFileName(job.index));
+                    const onDiskPath = path.join(outputDir, writePageName(job.index, job.file));
                     const onDisk = fs.statSync(onDiskPath).size;
                     if (onDisk > 0) {
-                        pages.push({ index: job.index, data: null, reused: true, diskPath: onDiskPath });
+                        pages.push({ index: job.index, file: job.file, data: null, reused: true, diskPath: onDiskPath });
                         completed += 1;
                         reused += 1;
                         // A reused page still counts towards the volume's size,
@@ -575,7 +586,7 @@ async function runPublicTrialJob(options = {}) {
                     }
                 }
                 if (!normalized) throw lastPageError || new Error('page download failed');
-                pages.push({ index: job.index, data: normalized });
+                pages.push({ index: job.index, file: job.file, data: normalized });
                 completed += 1;
                 bytes += normalized.length;
                 if (options.onProgress) options.onProgress({
@@ -627,6 +638,7 @@ async function runPublicTrialJob(options = {}) {
                     signal: options.signal,
                     total,
                     uploaded: ++uploaded,
+                    name: bridgePageName(page.index, page.file),
                     onProgress: options.onProgress
                 });
             }
@@ -655,7 +667,7 @@ async function runPublicTrialJob(options = {}) {
         const writeStarted = Date.now();
         for (const page of pages) {
             if (!page.data) continue;
-            fs.writeFileSync(path.join(outputDir, pageFileName(page.index)), page.data);
+            fs.writeFileSync(path.join(outputDir, writePageName(page.index, page.file)), page.data);
             written++;
         }
         if (options.onPhase) options.onPhase('write', Date.now() - writeStarted);
@@ -674,13 +686,16 @@ async function runPublicTrialJob(options = {}) {
             pageCount: pages.length,
             written,
             reused,
+            // The names actually used, so the caller can age the pages without
+            // re-deriving the naming policy the engine just applied.
+            pageFiles: pages.map((page) => writePageName(page.index, page.file)),
             failures: failed,
             unlicensed: unlicensed.length
         };
     }
 
     if (options.onProgress) options.onProgress({ type: 'zip-start', total: pages.length });
-    const zip = buildZip(pages.map(page => ({ name: `page-${String(page.index).padStart(4, '0')}.jpg`, data: page.data })));
+    const zip = buildZip(pages.map(page => ({ name: writePageName(page.index, page.file), data: page.data })));
     const outputPath = path.join(outputDir, `${title}.zip`);
     fs.writeFileSync(outputPath, zip);
     if (options.onProgress) options.onProgress({ type: 'zip-complete', total: pages.length, outputPath });

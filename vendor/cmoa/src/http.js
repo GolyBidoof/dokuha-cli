@@ -152,7 +152,6 @@ export async function fetchWithRetry(url, options = {}) {
   throw lastError ?? new Error(`request failed: ${url}`);
 }
 
-/** Fetch JSON with retries. */
 export async function fetchJson(url, options = {}) {
   const text = await fetchWithRetry(url, options);
   try {

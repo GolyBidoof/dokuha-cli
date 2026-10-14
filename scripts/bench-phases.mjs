@@ -28,7 +28,7 @@ const STORES = {
     ebookjapan: 'https://ebookjapan.yahoo.co.jp/books/716241/A007056462/',
     bookwalker: 'https://bookwalker.jp/def5a49973-58a0-44b0-a6ce-41abdc306335/',
     kmanga: 'https://comic.k-manga.jp/title/167001/pv',
-    kindle: 'https://www.amazon.co.jp/dp/B0B683NKKV/',
+    kindle: 'https://www.amazon.co.jp/dp/B000000001/',
 };
 
 const argv = process.argv.slice(2);

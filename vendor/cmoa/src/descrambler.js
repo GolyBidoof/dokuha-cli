@@ -56,7 +56,6 @@ function decodeNumericChar(ch) {
   return -1;
 }
 
-/** A descrambler that leaves the image untouched. */
 class IdentityDescrambler {
   constructor() {
     this.kind = 'none';

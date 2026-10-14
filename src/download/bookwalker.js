@@ -6,8 +6,9 @@ import { createRequire } from 'node:module';
 import { startBridgeSession } from '../bridge.js';
 import { timed } from '../phase-timer.js';
 import { volumeFolder, writeVolumeMarker } from './volume-folder.js';
+import { existingVolume } from './existing-volume.js';
 import { BwNormalizePool, defaultNormalizeWorkers } from './bw-normalize-pool.js';
-import { pageFileName, stampPageTimes } from './page-files.js';
+import { bookWalkerPageName, stampPageTimes } from './page-files.js';
 import {
     MAX_SERIES_PAGES,
     dedupeBookwalkerVolumes,
@@ -151,18 +152,21 @@ function licenceError(payload, config) {
     const signedIn = config.bwCookies.length > 0 || !config.bwNoState;
     const hints = [];
     if (status && signedIn) {
-        hints.push('The session may have expired. Sign in again on bookwalker.jp and copy fresh cookies.');
+        hints.push('The session may have expired. Sign in again at bookwalker.jp and copy fresh cookies.');
+        hints.push('A BookWalker session is split across two hosts, and both halves are needed:');
+        hints.push('  viewer.bookwalker.jp  -> SESSION, u1, bid');
+        hints.push('  member.bookwalker.jp  -> JSESSIONID (used as `kpid`)');
+        hints.push('Pass each with its own --bw-cookie; the flag is repeatable.');
     }
     if (!config.bwNoState) {
         hints.push('Try clearing the saved session with --no-state.');
     }
     hints.push('Free volumes need no session at all; drop --bw-cookie and --bw-state to test that.');
+    hints.push('Step-by-step: docs/auth.md.');
     return `BookWalker did not grant a licence${status}.\n  ${hints.join('\n  ')}`;
 }
 
 export async function downloadBookwalker(task, ctx) {
-    assertSharpAvailable();
-    const { runPublicTrialJob, BridgeClient: BwBridgeClient } = loadSampler();
     const { config, progress } = ctx;
     const wantOcr = Boolean(ctx.bridge);
 
@@ -174,15 +178,21 @@ export async function downloadBookwalker(task, ctx) {
         throw new Error(licenceError(payload, config));
     }
 
+    const title = String(payload.cti || task.title || task.cid);
+    const folder = await volumeFolder(ctx, { title, id: task.cid, sample });
+    const existing = await existingVolume(ctx, {
+        store: 'bookwalker', title, id: task.cid, sample, folder,
+        checkRemote: !task.title,
+    });
+    if (existing) return existing;
+    assertSharpAvailable();
+    const { runPublicTrialJob, BridgeClient: BwBridgeClient } = loadSampler();
     if (!config.bwNoState && !session.cached && (sample || allowsSharing(config))) {
         try {
             const stateFile = optionsFor(ctx.bwCarrier, config).stateFile;
             loadSampler().writeLicence(licenceKey(task.cid, sample), payload, { stateFile });
         } catch {  }
     }
-
-    const title = String(payload.cti || task.title || task.cid);
-    const folder = await volumeFolder(ctx, { title, id: task.cid, sample });
     await fsp.mkdir(folder, { recursive: true });
 
     const baseUrl = String(payload.url).replace(/\/*$/, '/');
@@ -236,6 +246,9 @@ export async function downloadBookwalker(task, ctx) {
             reuseExisting: true,
             pageConcurrency: ctx.bwConcurrency ?? config.bwConcurrency,
             pageUploadConcurrency: config.pushConcurrency,
+            // The engine owns the page loop, so only it knows each page's
+            // manifest source; the naming policy itself stays dokuha-owned.
+            pageName: bookWalkerPageName,
             normalizePage,
             // The engine owns the page loop, so it is the only thing that can say how
             // much of a page was transport and how much was seam-carving.
@@ -248,9 +261,8 @@ export async function downloadBookwalker(task, ctx) {
     }
 
 
-    if (!config.zip && result.pageCount) {
-        const files = Array.from({ length: result.pageCount }, (_, i) => pageFileName(i + 1, 'jpg'));
-        await stampPageTimes(folder, files);
+    if (!config.zip && result.pageFiles?.length) {
+        await stampPageTimes(folder, result.pageFiles);
     }
 
     const record = {
@@ -268,7 +280,9 @@ export async function downloadBookwalker(task, ctx) {
         mode: result.mode,
     };
 
-    await writeVolumeMarker(folder, { store: 'bookwalker', id: task.cid, title });
+    await writeVolumeMarker(folder, {
+        store: 'bookwalker', id: task.cid, title, expectedPages: result.total || result.pageCount,
+    });
 
     if (wantOcr) {
 
@@ -444,7 +458,16 @@ export const platform = {
     id: 'bookwalker',
     label: 'BW',
     lane: 'net',
-    workerKey: 'bookwalker',
+    // BookWalker runs on the net lane but still takes a thread count: its
+    // seam-carving pool is the other consumer of the shared CPU budget.
+    tuning: {
+        concurrency: 128,
+        contextKey: 'bwConcurrency',
+        cpuWeight: 0.8,
+        cpuSlot: 'normalizeWorkers',
+        flag: { name: 'bw-concurrency', order: 3, help: 'BookWalker pages in flight' },
+    },
+    hosts: ['bookwalker.jp'],
     patterns: [
         { re: /bookwalker\.jp\/series\/(\d+)/i, kind: 'bookwalker-series',
             build: (m, raw) => ({ kind: 'bookwalker-series', seriesId: m[1], url: raw }) },
