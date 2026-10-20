@@ -247,5 +247,94 @@ function fakeStore({ timeline, delay = 30 }) {
         timeline.map((e) => `${e.what}:${e.id}`).join(' '));
 }
 
+// ---------------------------------------------------------------------------
+// 5. One volume per target, and a skipped input says why
+// ---------------------------------------------------------------------------
+
+// The same URL twice, or a series URL plus one of its own volumes, used to dispatch
+// two downloads into one folder. The two writers raced on the same page files and
+// completion marker, and the summary counted the volume twice.
+{
+    const timeline = [];
+    let adapterCalls = 0;
+    const config = makeConfig([]);
+    const { summary } = await run(['0000249001_jp_0031', '0000249001_jp_0031'], config, {
+        out: { write() {} },
+        err: { write() {} },
+        callAdapter: async (task, ctx) => {
+            adapterCalls += 1;
+            return fakeStore({ timeline, delay: 5 })(task, ctx);
+        },
+        connectBridge: fakeBridge({ timeline, onBridge: () => sleep(1) }),
+    });
+    checkEqual('a repeated URL is discovered once', summary.volumes, 1);
+    checkEqual('a repeated URL is downloaded once', adapterCalls, 1);
+    checkEqual('one folder is written for the repeated URL',
+        fs.readdirSync(outDir).filter((name) => name === '0000249001_jp_0031').length, 1);
+}
+
+// A dry run printed why an input was skipped, but a normal run did not: the rejection
+// list was read before series resolution finished filling it, so a typo in a batch was
+// silent and the exit code was 0.
+{
+    const timeline = [];
+    const messages = [];
+    const { config } = parseOptions(['--out', outDir, '--no-progress', '--parallel', '1']);
+    config.mokuro = true;
+    const { summary } = await run(['0000249001_jp_0032', 'https://example.invalid/nope'], config, {
+        out: { write() {} },
+        err: { write(chunk) { messages.push(String(chunk)); } },
+        callAdapter: fakeStore({ timeline, delay: 5 }),
+        connectBridge: fakeBridge({ timeline, onBridge: () => sleep(1) }),
+    });
+    const stderr = messages.join('');
+    checkEqual('an unsupported input is counted as unsupported', summary.unsupported.length, 1);
+    check('an unsupported input says why on a normal run',
+        /skipped https:\/\/example\.invalid\/nope: .+/.test(stderr), stderr);
+}
+
+// A bridge that finished with `partial_upload` uploaded the volume files but not the
+// series index, which the reader cannot build. The bridge treats that as a failure and
+// so must the run: it used to exit 0 because only per-page upload failures were counted.
+{
+    const timeline = [];
+    const config = makeConfig(['--parallel', '1']);
+    const client = {
+        baseUrl: 'http://127.0.0.1:1',
+        async startSession(title) { return { session_id: `sess-${title}` }; },
+        async pushPage() {},
+        async finalize() {
+            return {
+                status: 'partial_upload',
+                message: 'Could not update series.json: permission denied',
+                pages_ocr_done: 3,
+                uploads: [
+                    { file: 'volume.webp', bytes: 10, total_bytes: 10, success: true },
+                    { file: 'volume.cbz', bytes: 20, total_bytes: 20, success: true },
+                    { file: 'volume.mokuro', bytes: 5, total_bytes: 5, success: true },
+                ],
+            };
+        },
+    };
+    const { code, summary } = await run(['0000249001_jp_0041'], config, {
+        out: { write() {} },
+        err: { write() {} },
+        callAdapter: fakeStore({ timeline, delay: 5 }),
+        connectBridge: async () => ({
+            client,
+            baseUrl: client.baseUrl,
+            health: { mokuro_installed: true },
+            destInfo: { method: 'mega', params: { uploadMethod: 'mega' } },
+            describeDestinations: () => 'mega',
+        }),
+    });
+    checkEqual('a partial upload is a failed volume', summary.failed, 1);
+    checkEqual('a partial upload exits non-zero', code, 1);
+    check('a partial upload says the series index is missing',
+        /series\.json/.test(summary.results[0]?.error || ''), summary.results[0]?.error);
+    checkEqual('the terminal status stays on the record',
+        summary.results[0]?.mokuro?.status, 'partial_upload');
+}
+
 fs.rmSync(outDir, { recursive: true, force: true });
 finish();

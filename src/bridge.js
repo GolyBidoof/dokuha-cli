@@ -19,6 +19,56 @@ export function contentTypeFor(name) {
     return CONTENT_TYPES[path.extname(String(name)).toLowerCase()] || 'application/octet-stream';
 }
 
+// The bridge's output files, in the order they are reported, mapped to the footer's
+// size categories. `series.json` is per series rather than per volume, so a run with
+// several volumes updates the same category repeatedly; the display keeps the size,
+// not a running sum, which is why a repeated update is harmless.
+const ARTIFACT_KINDS = [
+    [/(^|[\\/])series\.json$/i, 'series'],
+    [/\.webp$/i, 'webp'],
+    [/\.cbz$/i, 'cbz'],
+    [/\.mokuro$/i, 'mokuro'],
+];
+
+function artifactKind(file) {
+    const name = String(file || '');
+    for (const [pattern, kind] of ARTIFACT_KINDS) {
+        if (pattern.test(name)) return kind;
+    }
+    return null;
+}
+
+/**
+ * The final size of one file in a terminal `done.uploads[]` entry.
+ *
+ * A local `done` frame reports `size`, but the remote summary the bridge builds
+ * carries `bytes`/`total_bytes` instead, so reading only `size` silently dropped the
+ * footer totals for every remote destination (and with them the series.json size,
+ * which has no per-file upload event). A later bridge that adds `size` back to the
+ * remote summary must keep working, so all three spellings are accepted.
+ */
+function uploadSize(item) {
+    for (const value of [item?.size, item?.total_bytes, item?.bytes]) {
+        const size = Number(value);
+        if (Number.isFinite(size) && size >= 0) return size;
+    }
+    return null;
+}
+
+/**
+ * `done.uploads[]` with `size` filled in for every entry that reported a byte count.
+ *
+ * The result is part of the per-volume record (`mokuro.outputFiles`) and the JSON
+ * summary, so a consumer should not have to know which spelling the bridge used.
+ */
+export function normalizeUploads(uploads) {
+    if (!Array.isArray(uploads)) return null;
+    return uploads.map((item) => {
+        const size = uploadSize(item);
+        return size === null ? { ...item } : { ...item, size };
+    });
+}
+
 /**
  * Collect a resumed-session notice instead of printing it.
  *
@@ -45,7 +95,7 @@ async function inspectExistingSession(client, title, ctx = {}, key = null) {
         return { alreadyHandled: true, existingSession: null, queue, state };
     }
     const counts = (queue?.per_session || []).find((item) => item.session_id === match.session_id);
-    const state = existingSessionState(match, queue);
+    const state = bridgeSessionState(match, queue);
     if (key) {
         ctx.progress?.update?.(key, {
             phase: 'ocr',
@@ -67,7 +117,7 @@ async function inspectExistingSession(client, title, ctx = {}, key = null) {
     return { alreadyHandled: true, existingSession: match, queue, state };
 }
 
-export async function startBridgeSession(client, title, { reuseExisting = true, progress, key } = {}) {
+export async function startBridgeSession(client, title, { reuseExisting = true, progress, key, ctx = null } = {}) {
     try {
         return await client.startSession(title, { reuseExisting });
     } catch (error) {
@@ -75,9 +125,14 @@ export async function startBridgeSession(client, title, { reuseExisting = true, 
             && /finalizing or already finalized|concurrently/i.test(error.message || '');
         if (!existingSession) throw error;
         try {
-            const state = await inspectExistingSession(client, title, { progress }, key);
+            // Keep the caller's shared resume map in the options object: `noteResume`
+            // mutates it, and a fresh literal here would collect the notice where the
+            // run's teardown never reads it.
+            const state = await inspectExistingSession(client, title, { progress, bridgeResume: ctx?.bridgeResume }, key);
             if (state) return state;
         } catch (statusError) {
+            // The caller's context carries the grouped resume notice. Without it the
+            // duplicate-session recovery threw a ReferenceError instead of skipping.
             noteResume(ctx, 'unknown', null);
             return {
                 alreadyHandled: true,
@@ -114,10 +169,11 @@ export async function pageFiles(folder) {
  * `wait_ocr` frame at least every 0.75 s while the OCR queue drains, and an
  * `upload_progress` frame per file while a remote destination uploads -- the exact
  * information this used to collect by polling `GET /session/<id>/status` on a
- * 1–4 s interval *alongside* the request. No dokuha code path polls that route
- * any more, on either hand-off: the vendored client still exposes `status()` and
- * `waitForOcr()`, but nothing under `src/` calls them, because the folder-ingest
- * path and the per-page path both end up here.
+ * 1–4 s interval *alongside* the request. No dokuha path polls that route for
+ * progress any more, on either hand-off. `status()` is still called when resuming
+ * an existing session (to read its counters and decide whether it is ready to
+ * finalize, or already gone), and `waitForOcr()` is unused; everything that drives
+ * a progress bar goes through this stream.
  *
  * Calling finalize early is also what makes the bridge stop waiting: it
  * force-flushes the pending OCR queue on admission, so the last few pages do not
@@ -128,11 +184,22 @@ export async function pageFiles(folder) {
  * model.
  */
 export async function finalizeWithProgress(client, sessionId, key, destInfo, ctx = {}) {
+    // This is the first point that is definitely a bridge handoff (a resumed session
+    // that matches, or a run started with --mokuro). The display uses it to switch
+    // from the download-only percentage to the staged one even when run() did not
+    // know a bridge would be involved.
+    if (ctx.progress) ctx.progress.pipelineExpected = true;
     const params = {
         ...destInfo.params,
 
         deleteAfterUpload: destInfo.method !== 'local',
-        ...(ctx.overwrite ? { overwrite: ctx.overwrite } : {}),
+        // The bridge's collision policy takes `fail` (its default), `skip` or
+        // `overwrite`; there is no boolean form. Passing `true` from --force made it
+        // behave like `fail`, so a re-run died on "destination already exists" after
+        // the OCR work was already done. Map the flag to the value it understands.
+        ...(ctx.overwrite
+            ? { overwrite: typeof ctx.overwrite === 'string' ? ctx.overwrite : 'overwrite' }
+            : {}),
     };
 
     const controller = new AbortController();
@@ -146,6 +213,7 @@ export async function finalizeWithProgress(client, sessionId, key, destInfo, ctx
     const UPLOAD_ARCHIVE = /\.cbz$/i;
     let uploadPercent = 0;
     let archiveUploaded = false;
+    let finalUploads = null;
 
     const ocrWaitMs = Number(ctx.ocrWaitMs);
     const timer = Number.isFinite(ocrWaitMs) && ocrWaitMs > 0
@@ -172,9 +240,19 @@ export async function finalizeWithProgress(client, sessionId, key, destInfo, ctx
             return;
         }
         stage = name;
+        if (name === 'done') {
+            // The terminal frame carries every uploaded file with its final size,
+            // including series.json, which has no per-file upload_progress event.
+            if (Array.isArray(event.uploads)) finalUploads = event.uploads;
+            return;
+        }
         if (name === 'upload_progress' && event.upload) {
             const upload = event.upload;
             const file = upload.file || null;
+            // The bridge reports a file's total size as soon as the transfer starts,
+            // which is what lets the footer total the artifacts as they land.
+            const bytes = Number(upload.total_bytes);
+            if (bytes > 0) ctx.progress?.artifact?.(key, artifactKind(file), bytes);
             // The archive is the upload. The cover and the mokuro file are small
             // sidecars, and averaging them in held the bar at a third and then at two
             // thirds while the real transfer was still running, which read as a stall
@@ -216,6 +294,16 @@ export async function finalizeWithProgress(client, sessionId, key, destInfo, ctx
                 : {}),
         });
         ctx.progress?.update?.(key, { bridgeState: '' });
+        // Sizes from the terminal frame are authoritative and include every file; the
+        // per-upload estimates above cover the live part, this covers the rest.
+        const uploads = Array.isArray(final?.uploads)
+            ? final.uploads
+            : (finalUploads || []);
+        for (const item of uploads) {
+            if (item && item.success === false) continue;
+            const size = uploadSize(item);
+            if (size !== null) ctx.progress?.artifact?.(key, artifactKind(item?.file), size);
+        }
         // The `done` frame carries `pages_ocr_done` but not `pages_ocr_failed`, so
         // the last `wait_ocr` frame is the only place the failure count exists.
         // Hand it back beside the final record rather than reporting `null`.
@@ -246,9 +334,21 @@ function sameBridgeTitle(a, b) {
     return normalize(a) !== '' && normalize(a) === normalize(b);
 }
 
-function existingSessionState(session, queue) {
+/**
+ * A one-line description of what a bridge session is doing.
+ *
+ * `upload` in the session snapshot is state, not an activity flag: the bridge writes
+ * a dict on the first upload (the early cover push) and leaves `active: false` in it
+ * until the remote transfer actually starts. Only `upload.active` means bytes are
+ * moving; treating the dict itself as truthy paints a finished cover push as
+ * "bridge uploading" for the whole OCR phase.
+ */
+export function bridgeSessionState(session, queue) {
+    if (!session) return 'bridge session unavailable';
     if (session.source_ingesting || session.pages_ingesting?.length) return 'bridge ingesting';
-    if (session.upload?.active) return 'bridge uploading';
+    if (session.upload?.active) {
+        return `bridge uploading ${session.upload.file || ''}`.trim();
+    }
     const counts = (queue?.per_session || []).find((item) => item.session_id === session.session_id);
     const pending = Number(session.pages_ocr_pending ?? counts?.pending) || 0;
     const processing = Number(counts?.processing) || 0;
@@ -396,7 +496,10 @@ export async function pushToBridge(client, destInfo, target, ctx) {
     if (!files.length) throw new Error(`no page images found in ${target.folder}`);
 
     const completion = await readCompletion(target.folder);
-    if (completion && completion.destination === destinationKey(destInfo)
+    // A receipt only skips work the user did not ask to repeat. --force means "do it
+    // again", including the destination upload, so the bridge hand-off must not be
+    // short-circuited by the marker a previous run wrote for the same pages.
+    if (!ctx.overwrite && completion && completion.destination === destinationKey(destInfo)
         && await samePageSet(files, completion.signature)) {
         const pages = completion.signature.count;
         ctx.progress?.update?.(key, {
@@ -439,6 +542,7 @@ export async function pushToBridge(client, destInfo, target, ctx) {
     const session = await startBridgeSession(client, target.title || target.id, {
         progress: ctx.progress,
         key,
+        ctx,
     });
     if (session?.alreadyHandled) {
         const result = await resumeExistingSession(client, destInfo, target, files, session, ctx);
@@ -491,7 +595,13 @@ export async function pushToBridge(client, destInfo, target, ctx) {
         ocrDone: final?.pages_ocr_done ?? final?.ocr?.pages_ocr_done ?? null,
         ocrFailed: final?.pages_ocr_failed ?? final?.ocr?.pages_ocr_failed ?? null,
         outputDir: final?.output_dir || final?.outputDir || null,
-        outputFiles: final?.uploads || null,
+        outputFiles: normalizeUploads(final?.uploads),
+        // `partial_upload` means the volume files arrived but the series index did
+        // not; a folder without series.json is a series the reader cannot build, so
+        // the caller reports the volume as failed instead of a success.
+        status: final?.status || null,
+        message: final?.message || '',
+        partial: final?.status === 'partial_upload',
         failures,
         completed: final?.status === 'success',
     };
@@ -526,74 +636,53 @@ export async function resumeExistingSession(client, destInfo, target, files, exi
     let latest = existing.existingSession;
     const startedAt = Date.now();
     const deadline = startedAt + (Number(ctx?.ocrWaitMs) > 0 ? Number(ctx.ocrWaitMs) : 3600_000);
+    // A session that is already finished, or was finalized by another client, is a
+    // skip: there is no work left for this run and nothing to retry. All the counters
+    // come from the last snapshot this client saw.
+    const settled = (state, note = null) => {
+        if (note) noteResume(ctx, note, target.title || target.id);
+        return {
+            bridge: client.baseUrl,
+            destination: destInfo.method,
+            sessionId,
+            ingest: 'already-completed',
+            alreadyHandled: true,
+            completed: false,
+            existingState: state,
+            pagesIngested: Number(latest?.pages_received) || files.length,
+            pagesQueued: 0,
+            pagesUploaded: 0,
+            pagesAlreadyOcr: Number(latest?.pages_ocr_done) || 0,
+            pagesFailed: 0,
+            ocrDone: Number(latest?.pages_ocr_done) || null,
+            ocrFailed: Number(latest?.pages_ocr_failed) || 0,
+            outputDir: null,
+            outputFiles: null,
+            failures: [],
+        };
+    };
     for (;;) {
         try {
             latest = await client.status(sessionId);
         } catch (error) {
-            if (error?.status === 404) {
-                noteResume(ctx, 'finished', target.title || target.id);
-                return {
-                    bridge: client.baseUrl,
-                    destination: destInfo.method,
-                    sessionId,
-                    ingest: 'resumed-existing',
-                    alreadyHandled: true,
-                    completed: false,
-                    completionObserved: false,
-                    existingState: 'bridge session finished',
-                    pagesIngested: Number(latest.pages_received) || files.length,
-                    pagesQueued: 0,
-                    pagesUploaded: 0,
-                    pagesAlreadyOcr: Number(latest.pages_ocr_done) || 0,
-                    pagesFailed: Number(latest.pages_ocr_failed) || 0,
-                    ocrDone: Number(latest.pages_ocr_done) || null,
-                    ocrFailed: Number(latest.pages_ocr_failed) || null,
-                    outputDir: null,
-                    outputFiles: null,
-                    failures: [],
-                };
-            }
+            // The bridge removes a session from memory and disk when it succeeds, so
+            // a 404 is the normal "finished and cleaned up". A persisted record that
+            // reached its terminal state but could not be removed answers 400
+            // "Session already finalized". Both mean there is nothing left to do.
+            const finished = error?.status === 404
+                || (error?.status === 400 && /already finalized/i.test(error.message || ''));
+            if (finished) return settled('bridge session finished', 'finished');
             throw error;
         }
 
-        if (latest.finalized) {
-            return {
-                bridge: client.baseUrl,
-                destination: destInfo.method,
-                sessionId,
-                ingest: 'already-completed',
-                alreadyHandled: true,
-                completed: false,
-                existingState: 'bridge session was already finalized',
-                pagesIngested: Number(latest.pages_received) || files.length,
-                pagesQueued: 0,
-                pagesUploaded: 0,
-                pagesAlreadyOcr: Number(latest.pages_ocr_done) || 0,
-                pagesFailed: 0,
-                ocrDone: Number(latest.pages_ocr_done) || null,
-                ocrFailed: Number(latest.pages_ocr_failed) || 0,
-                outputDir: null,
-                outputFiles: null,
-                failures: [],
-            };
-        }
+        if (latest.finalized) return settled('bridge session was already finalized');
 
         const queue = await client.queue().catch(() => null);
         const queueEntry = (queue?.per_session || []).find((item) => item.session_id === sessionId);
         const pending = Number(latest.pages_ocr_pending) || 0;
         const processing = Number(queueEntry?.processing) || 0;
-        const upload = latest.upload;
-        const state = upload?.active
-            ? `bridge uploading ${upload.file || ''}`.trim()
-            : latest.source_ingesting || latest.ingesting
-                ? 'bridge ingesting pages'
-                : processing
-                    ? `bridge OCR processing ${processing}, ${pending} pending`
-                    : pending
-                        ? `bridge OCR queued ${pending}`
-                        : latest.finalizing
-                            ? 'bridge assembling .mokuro'
-                            : 'bridge session ready to finalize';
+        const upload = latest.upload?.active ? latest.upload : null;
+        const state = bridgeSessionState(latest, queue);
 
         ctx.progress?.update?.(target.key, {
             phase: upload?.active ? 'finalizing' : 'ocr',
@@ -641,13 +730,25 @@ export async function resumeExistingSession(client, destInfo, target, files, exi
                     ocrDone: final?.pages_ocr_done ?? final?.ocr?.pages_ocr_done ?? null,
                     ocrFailed: final?.pages_ocr_failed ?? final?.ocr?.pages_ocr_failed ?? null,
                     outputDir: final?.output_dir || final?.outputDir || null,
-                    outputFiles: final?.uploads || null,
+                    outputFiles: normalizeUploads(final?.uploads),
+                    status: final?.status || null,
+                    message: final?.message || '',
+                    partial: final?.status === 'partial_upload',
                     failures: [],
                     completed: final?.status === 'success',
                 };
                 return result;
             } catch (error) {
-                if (!/finalize 409/.test(error.message || '')) throw error;
+                const message = error.message || '';
+                // Another client owns the finalize: fall through to the bounded wait
+                // and retry. A 400 saying the session is already finalized means it
+                // was completed elsewhere, which is a skip rather than a failure.
+                if (!/finalize 409/.test(message)) {
+                    if (/finalize 400/.test(message) && /already finalized/i.test(message)) {
+                        return settled('bridge session was finalized by another client');
+                    }
+                    throw error;
+                }
             }
         }
         if (Date.now() > deadline) {
@@ -699,7 +800,10 @@ async function finishIngested(client, session, files, key, destInfo, ctx) {
         ocrDone: final?.pages_ocr_done ?? final?.ocr?.pages_ocr_done ?? null,
         ocrFailed: final?.pages_ocr_failed ?? final?.ocr?.pages_ocr_failed ?? null,
         outputDir: final?.output_dir || final?.outputDir || null,
-        outputFiles: final?.uploads || null,
+        outputFiles: normalizeUploads(final?.uploads),
+        status: final?.status || null,
+        message: final?.message || '',
+        partial: final?.status === 'partial_upload',
         failures: [],
         completed: final?.status === 'success',
     };

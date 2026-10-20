@@ -23,7 +23,7 @@ const PHASE_LABEL = {
 
 export class LiveProgress {
 
-  constructor({ stream = process.stderr, quiet = false, plain = false, width = null, maxLines = 10 } = {}) {
+  constructor({ stream = process.stderr, quiet = false, plain = false, width = null, maxLines = 10, pipelineExpected = true } = {}) {
     this.stream = stream;
     this.quiet = quiet;
     this.color = useColor(stream);
@@ -32,6 +32,12 @@ export class LiveProgress {
 
     this.maxLines = maxLines;
     this.compact = false;
+    // Pausing is for the human, not the run: the terminal redraw that keeps the
+    // block current is also what makes mouse selection impossible during a download.
+    // While paused nothing is painted, progress events keep updating the state, and
+    // notes are held until resume so a warning cannot shift the frozen block.
+    this.paused = false;
+    this.pendingNotes = [];
 
     this.keyboard = null;
     this.width = width || (stream && stream.columns) || 100;
@@ -56,6 +62,17 @@ export class LiveProgress {
     // Whether this run has a destination to send to, which the bar needs before it
     // can show an assembling band. The run sets it once it knows the method.
     this.uploadExpected = false;
+    // Whether OCR or an upload follows the download. The stage weights below were
+    // measured on a mokuro run, where the download is only its first 30 percent. A
+    // download-only run using them could not pass 30 percent until a volume finished,
+    // so its footer bar was full while its own percentage still read 56. run() clears
+    // this when no bridge is in play; a volume that reaches a bridge phase re-enables
+    // it even if the flag was never set.
+    this.pipelineExpected = pipelineExpected;
+    // High water marks for the two footer numbers, so a late page total or a volume
+    // that leaves a stage cannot make the display step backwards.
+    this.bestOverall = 0;
+    this.bandBest = null;
     // The last few notes, so a resize can rebuild the screen with them in place.
     this.recentNotes = [];
 
@@ -76,6 +93,9 @@ export class LiveProgress {
         this.resizeTimer = null;
         const settled = (stream && stream.columns) || process.stdout.columns;
         if (settled) this.width = settled;
+        // A paused block is being read or selected; a resize redraw would clear the
+        // screen under the selection. Resume will pick up the new width.
+        if (this.paused) return;
         const notes = this.recentNotes.length ? `${this.recentNotes.join('\n')}\n` : '';
         this.stream.write(`\x1b[2J\x1b[H${notes}`);
         this.anchored = false;
@@ -120,6 +140,10 @@ export class LiveProgress {
       done: 0,
       failed: 0,
       bytes: 0,
+      // Sizes of the files the bridge produces for this volume. The page bytes above
+      // are the manga as downloaded; these are the outputs, tracked separately so the
+      // footer can total both without counting the archive twice.
+      artifacts: { webp: 0, cbz: 0, mokuro: 0, series: 0 },
       upload: 0,
       uploadTotal: 0,
       uploadCached: 0,
@@ -147,6 +171,13 @@ export class LiveProgress {
     this.volumes.push(volume);
     this.byKey.set(key, volume);
     return volume;
+  }
+
+  // The row a key belongs to, for call sites that need a counter they are about to
+  // increment. Without this the BookWalker adapter's failure path threw: it read
+  // `progress.get(key)?.failed` on an object that only had a private map.
+  get(key) {
+    return this.byKey.get(key) || null;
   }
 
   update(key, patch = {}) {
@@ -179,6 +210,24 @@ export class LiveProgress {
     return volume;
   }
 
+  /**
+   * Record the final size of one artifact the bridge wrote for a volume.
+   *
+   * The upload stream reports each file as it transfers (cover, archive, .mokuro),
+   * and the terminal `done` frame carries the complete list, which is the only place
+   * the per-series `series.json` size exists. Sizes are totals, not deltas, so an
+   * update can be repeated without inflating the footer.
+   */
+  artifact(key, kind, bytes) {
+    const volume = this.byKey.get(key);
+    if (!volume || !volume.artifacts || !(kind in volume.artifacts)) return;
+    const size = Number(bytes);
+    if (!Number.isFinite(size) || size < 0) return;
+    if (volume.artifacts[kind] === size) return;
+    volume.artifacts[kind] = size;
+    this.tick();
+  }
+
   updateBridgeStatus(status) {
     this.bridgeStatus = status || null;
     this.tick();
@@ -201,15 +250,36 @@ export class LiveProgress {
       volume.phase = 'error';
     } else if (volume.phase !== 'error') {
       volume.completed = volume.total || volume.done || 0;
+      // The last wait_ocr frame can carry one page still pending while the bridge has
+      // already finished: a done row then left the footer reading "275 OCR'd" for 297
+      // pages. A finished volume has OCR'd everything the bridge received.
+      if (volume.ocrTotal) {
+        volume.ocr = volume.ocrTotal;
+        volume.ocrPending = 0;
+      }
+      // The bridge state line described a live session; the row no longer has one.
+      volume.bridgeState = '';
       volume.phase = 'done';
     }
     volume.endedAt = Date.now();
-    if (this.tty) this.draw(true);
-    else this.plainLine(volume);
+    // Finishing a volume updates the frozen frame's state but must not repaint it:
+    // a paused block is a copy target, and the next paint is the user's resume.
+    if (this.tty) {
+      if (!this.paused) this.draw(true);
+    } else {
+      this.plainLine(volume);
+    }
   }
 
   note(text) {
     if (this.quiet) return;
+    if (this.paused) {
+      // Printable notes are the one thing that could move a frozen block, so they
+      // wait for the resume and the footer says how many are waiting.
+      this.pendingNotes.push(String(text));
+      if (this.pendingNotes.length > 100) this.pendingNotes.shift();
+      return;
+    }
     if (!this.tty) {
       this.stream.write(text.endsWith('\n') ? text : `${text}\n`);
       return;
@@ -242,6 +312,34 @@ export class LiveProgress {
     this.draw(true);
   }
 
+  /**
+   * Freeze or unfreeze the live block so its text can be selected and copied.
+   *
+   * The block repaints every 120 ms, and every repaint moves the cursor and rewrites
+   * the same rows, which is what makes a drag-selection jump while a download runs.
+   * Pausing stops all painting; the run itself continues and the next resume paints
+   * the current state, with any notes that arrived meanwhile printed above it.
+   */
+  togglePause() {
+    if (!this.tty) return;
+    if (!this.paused) {
+      this.paused = true;
+      // Paint once with the paused footer, then stop until resume.
+      this.draw(true);
+      return;
+    }
+    this.resumeForEnd();
+    this.draw(true);
+  }
+
+  /** Leave pause mode and flush notes held while the block was frozen. */
+  resumeForEnd() {
+    if (!this.paused) return;
+    this.paused = false;
+    const held = this.pendingNotes.splice(0);
+    for (const text of held) this.note(text);
+  }
+
   fraction(volume) {
     const ratio = (done, total) => (total > 0 ? Math.min(1, done / total) : null);
     switch (volume.phase) {
@@ -264,10 +362,12 @@ export class LiveProgress {
           || Boolean(volume.uploadSpeed);
         // A finalizing volume never shows a full bar. The archive exists, but the volume
         // is not done until the bridge closes its session, and a full bar beside an
-        // upload at zero percent reads as finished when nothing has been sent.
+        // upload at zero percent reads as finished when nothing has been sent. The
+        // bridge's own percent can reach 100 while MEGA is still confirming the file,
+        // so even a complete byte count stays one cell short.
         if (!uploading) return 0.99;
         return volume.uploadBytesTotal > 0
-          ? ratio(volume.uploadBytes || 0, volume.uploadBytesTotal)
+          ? Math.min(0.99, ratio(volume.uploadBytes || 0, volume.uploadBytesTotal) ?? 0)
           : 0;
       }
       case 'done':
@@ -399,13 +499,17 @@ export class LiveProgress {
 
     // Keep enough room for the page count and downloaded size on ordinary
     // terminal widths; a 46-column title used to truncate the MiB figure away.
-    const labelWidth = Math.max(12, Math.min(28, this.width - 58));
+    const labelWidth = Math.max(8, Math.min(28, this.width - 58));
     const label = this.paint(padTo(truncate(volume.label, labelWidth), labelWidth), 'bold');
 
     const used = 2 + 1 + 1 + 4 + 1 + labelWidth + 1 + 8 + 1 + 12 + 1;
     const detailText = truncate(detail, Math.max(6, this.width - used));
 
-    return `  ${marker} ${tag} ${label} ${phase} ${meter} ${detailText}`.trimEnd();
+    // Below roughly 48 columns the fixed columns alone do not fit, and a wrapped row
+    // is not a cosmetic problem here: the redraw counts rows it wrote, and a wrapped
+    // one makes every following clear land a line too high. Clamping keeps one row per
+    // volume at every width.
+    return clampLine(`  ${marker} ${tag} ${label} ${phase} ${meter} ${detailText}`.trimEnd(), this.width);
   }
 
   phaseCounts() {
@@ -418,10 +522,24 @@ export class LiveProgress {
     const sum = (fn) => this.volumes.reduce((a, v) => a + fn(v), 0);
     const downloaded = sum((v) => v.done || 0);
     const known = sum((v) => v.total || 0);
+    const artifacts = { webp: 0, cbz: 0, mokuro: 0, series: 0 };
+    for (const volume of this.volumes) {
+      for (const kind of ['webp', 'cbz', 'mokuro']) artifacts[kind] += volume.artifacts?.[kind] || 0;
+      // series.json is one shared file per series, reported by every volume in that
+      // series. Summing it would multiply one small file by the volume count, so the
+      // footer counts it once. A run spanning several series shows the largest one,
+      // which is the closest a per-volume display can get without series keys.
+      artifacts.series = Math.max(artifacts.series, volume.artifacts?.series || 0);
+    }
 
     return {
       downloaded: known ? Math.min(downloaded, known) : downloaded,
       known,
+      // Bytes of the downloaded pages, and of the bridge's outputs. The archive
+      // repeats the pages, so it is shown but not added to the "extras" total.
+      bytes: sum((v) => v.bytes || 0),
+      artifacts,
+      extras: artifacts.webp + artifacts.mokuro + artifacts.series,
       completed: sum((v) => v.completed || 0),
       ocr: sum((v) => v.ocr || 0),
       finished: this.volumes.filter((v) => v.phase === 'done').length,
@@ -460,7 +578,49 @@ export class LiveProgress {
     return pages > 0 ? weighted / pages : 0;
   }
 
+  // What the footer is allowed to show. The raw fraction can dip when a queued
+  // volume's page total arrives (the denominator grows before its numerator does),
+  // and a stable-looking progress number is worth more than an honest one-pixel
+  // regression. Nothing is shown as complete until every row has settled: a
+  // plain download that has fetched every page still waits for its last volume to
+  // report done, so 100 percent cannot appear beside a row that says "download".
+  displayedFraction(t) {
+    const raw = this.overallFraction(t);
+    if (raw === null) return null;
+    this.bestOverall = Math.max(this.bestOverall, raw);
+    const settled = t.total > 0 && t.finished + t.failed === t.total;
+    return settled ? this.bestOverall : Math.min(this.bestOverall, 0.99);
+  }
+
+  // A bridge phase in the row list means the pipeline is real even if the run never
+  // set `pipelineExpected` (a resumed session discovered after the block was built).
+  // Only the two phases that exist solely on the bridge count: a local `finalizing`
+  // is ebookjapan or BookWalker zipping pages after the download, not an OCR hand-off.
+  pipelineUnderway() {
+    return this.volumes.some((volume) => volume.phase === 'uploading'
+      || volume.phase === 'ocr');
+  }
+
   volumeWeight(volume) {
+    if (!this.pipelineExpected && !this.pipelineUnderway()) {
+      // A download-only run: fetching the pages is the whole job, so a volume that
+      // has fetched them counts as complete and one still fetching counts by its own
+      // fraction. The mokuro weights below would cap every unfinished volume at 30
+      // percent and held the run's own percentage below its bar for the whole download.
+      if (volume.phase === 'downloading') {
+        return volume.total > 0 ? Math.min(1, Math.max(0, volume.done / volume.total)) : 0;
+      }
+      if (volume.phase === 'done') return 1;
+      // ebookjapan and BookWalker zip their pages locally after the download, which
+      // reports `finalizing` without any bridge. Those pages are already on disk, so
+      // the download stage is complete for them.
+      if (volume.phase === 'finalizing' || volume.phase === 'uploading' || volume.phase === 'ocr') return 1;
+      // A failed volume contributes only what it actually finished: counting it as a
+      // whole unit made a run with one failed volume read 100 percent, and a volume
+      // that died after 20 of 200 pages advance the footer as far as a finished one.
+      if (volume.phase === 'error') return this.fraction(volume) ?? 0;
+      return 0;
+    }
     // The weights follow how long each stage really takes on a mokuro run, where the
     // download is the quick part and OCR is the long one: download 30, the handover to
     // the bridge and the loan return 10, OCR 45, building the archive 5, destination
@@ -490,8 +650,11 @@ export class LiveProgress {
         return 0.9 + Math.min(1, Math.max(0, (volume.uploadBytes || 0) / volume.uploadBytesTotal)) * 0.09;
       }
       case 'done':
-      case 'error':
         return 1;
+      case 'error':
+        // Same rule as the download-only branch: a failure carries the fraction it
+        // reached, so the run's percentage cannot claim work that never happened.
+        return this.fraction(volume) ?? 0;
       default:
         return 0;
     }
@@ -541,21 +704,37 @@ export class LiveProgress {
       }
       return 0;
     };
-    return {
+    const rawBands = {
       download: mean((volume) => share(volume, 'downloading')),
       ocr: mean((volume) => share(volume, 'ocr')),
       // Assembling the archive is a stage in its own right, and it happens before the
-      // upload reports anything. It only means something when the run has a destination
-      // to send to, which is what uploadExpected records. The band stays lit once a
-      // volume has reached finalize: the archive exists from that point on, and that is
-      // what the colour is counting.
+      // upload reports anything. It is a pipeline stage whether or not the destination
+      // is remote: a local bridge still assembles, and suppressing the band there left
+      // the bar fully blue beside rows that said "assembling .mokuro". The band stays
+      // lit once a volume has reached finalize: the archive exists from that point on.
       assemble: mean((volume) => {
-        if (!this.uploadExpected) return 0;
+        if (!this.pipelineExpected) return 0;
         return volume.phase === 'finalizing' || volume.phase === 'done' || volume.phase === 'error' ? 1 : 0;
       }),
       upload: mean(uploaded),
-      done: mean((volume) => (volume.phase === 'done' && volume.uploadBytesTotal > 0 ? 1 : 0)),
+      // A volume that is done is done. Requiring upload bytes hid the green band for
+      // every local destination and for a volume whose session was already complete,
+      // which turned a 100 percent run into a fully cyan bar.
+      done: mean((volume) => (volume.phase === 'done' ? 1 : 0)),
     };
+
+    // Stages only move forward, and a late-arriving page total can shrink a stage's
+    // fraction before its next update. A progress bar that steps backwards reads as a
+    // bug even when the underlying counters are honest, so each band keeps its high
+    // water mark.
+    if (!this.bandBest) this.bandBest = { download: 0, ocr: 0, assemble: 0, upload: 0, done: 0 };
+    const bands = {};
+    for (const [name, value] of Object.entries(rawBands)) {
+      const reached = Math.min(1, Math.max(0, Number(value) || 0));
+      this.bandBest[name] = Math.max(this.bandBest[name] || 0, reached);
+      bands[name] = this.bandBest[name];
+    }
+    return bands;
   }
 
   stageRatio(done, total) {
@@ -563,6 +742,16 @@ export class LiveProgress {
   }
 
   pipelineBar(width) {
+    if (!this.pipelineExpected && !this.pipelineUnderway()) {
+      // One basis for both halves of the footer line: with no bridge stages to paint,
+      // the bar is the run's own completion, which is exactly the percentage beside it.
+      const fraction = this.displayedFraction(this.totals());
+      const filled = fraction === null ? 0 : Math.min(width, Math.max(0, Math.round(fraction * width)));
+      return [
+        filled > 0 ? this.paint('█'.repeat(filled), 'blue') : '',
+        width - filled > 0 ? this.paint('░'.repeat(width - filled), 'dim') : '',
+      ].join('');
+    }
     const { download, ocr, assemble, upload, done } = this.pipelineFractions();
     const cells = (fraction) => Math.min(width, Math.max(0, Math.round(fraction * width)));
     // Round each cumulative boundary once, then take run lengths by subtraction,
@@ -612,7 +801,7 @@ export class LiveProgress {
 
     const barWidth = Math.max(10, this.width - 8);
 
-    const fraction = this.overallFraction(t);
+    const fraction = this.displayedFraction(t);
     const bar = this.pipelineBar(barWidth);
     const pct = fraction === null ? '   -' : `${Math.floor(fraction * 100)}%`.padStart(4);
     const barLine = clampLine(`  ${bar} ${this.paint(pct, 'dim')}`, this.width);
@@ -620,6 +809,10 @@ export class LiveProgress {
     const counts = [];
     counts.push(`${t.finished}/${t.total} done`);
     if (t.known) counts.push(`${t.downloaded}/${t.known} pages`);
+    // The downloaded page bytes are the manga's size; the extras are the bridge's
+    // small outputs. Both are cumulative across every volume in the run.
+    if (t.bytes) counts.push(`${humanBytes(t.bytes)} manga`);
+    if (t.extras) counts.push(`${humanBytes(t.extras)} extras`);
     if (t.ocr) counts.push(this.paint(`${t.ocr} OCR'd`, 'yellow'));
     if (t.failed) counts.push(this.paint(`${t.failed} failed`, 'red'));
     if (this.bridgeStatus) {
@@ -639,6 +832,10 @@ export class LiveProgress {
         counts.push(`bridge ${worker}`);
       }
     }
+    if (this.paused) {
+      counts.push(this.paint('paused', 'yellow'));
+      if (this.pendingNotes.length) counts.push(`${this.pendingNotes.length} notes held`);
+    }
     counts.push(humanTime(elapsed));
 
     const phases = this.phaseBreakdown(t, { skipOcr: Boolean(this.bridgeStatus) });
@@ -647,13 +844,46 @@ export class LiveProgress {
       ? `  ${counts.join(sep)}${sep}${phases.join(sep)}`
       : `  ${counts.join(sep)}`;
 
-    const hint = this.keyboard
-      ? `${sep}${this.paint(this.compact ? 'c: expand' : 'c: compact', 'dim')}`
-      : '';
+    const hints = [];
+    if (this.keyboard) {
+      hints.push(this.compact ? 'c: expand' : 'c: compact');
+      hints.push(this.paused ? 'p: resume' : 'p: pause');
+    }
+    const hint = hints.length ? `${sep}${this.paint(hints.join(' · '), 'dim')}` : '';
     // Clamp the status, never the hint: trimming the whole line from the right
     // is what cut the key help down to "p: pau" on a long run.
     const statusWidth = Math.max(20, this.width - displayWidth(hint));
-    return [barLine, clampLine(this.paint(line2, 'dim'), statusWidth) + hint];
+    const artifactLine = this.artifactLine(t);
+    return [
+      barLine,
+      clampLine(this.paint(line2, 'dim'), statusWidth) + hint,
+      ...(artifactLine ? [artifactLine] : []),
+    ];
+  }
+
+  /**
+   * The bridge's output sizes, one line below the run totals.
+   *
+   * Each upload event reports the file's final byte count, so the sizes are exact
+   * rather than an estimate. The `.cbz` repeats the pages already counted as the
+   * manga, which is why it is listed here but not folded into "extras".
+   */
+  artifactLine(t) {
+    const labelled = [
+      ['webp', '.webp cover'],
+      ['cbz', '.cbz archive'],
+      ['mokuro', '.mokuro OCR'],
+      ['series', 'series.json'],
+    ];
+    const known = labelled.filter(([kind]) => t.artifacts[kind] > 0);
+    if (!known.length) return '';
+    const parts = known.map(([kind, label]) => `${label} ${humanBytes(t.artifacts[kind])}`);
+    return clampLine(`  ${this.paint(`output: ${parts.join(' · ')}`, 'dim')}`, this.width);
+  }
+
+  hasArtifacts() {
+    return this.volumes.some((volume) => volume.artifacts
+      && Object.values(volume.artifacts).some((size) => size > 0));
   }
 
   clear() {
@@ -670,6 +900,9 @@ export class LiveProgress {
 
   draw(force = false) {
     if (!this.tty || this.quiet) return;
+    // A paused block is a copy target: no timer tick, progress update or bridge poll
+    // may move the rows. Force is reserved for the pause/resume paints and the end.
+    if (this.paused && !force) return;
     const now = Date.now();
 
     if (!force && now - this.lastDraw < 80) return;
@@ -750,9 +983,12 @@ export class LiveProgress {
   }
 
   rowBudget() {
-    if (this.compact) return Math.max(3, this.maxLines - 3);
+    // The footer grows a third line when the bridge starts reporting artifact sizes;
+    // reserve that row too, or a full-height list would push the block off the screen.
+    const extra = this.hasArtifacts() ? 1 : 0;
+    if (this.compact) return Math.max(3, this.maxLines - 3 - extra);
     const rows = Number(this.stream?.rows) || 24;
-    return Math.max(3, rows - 4);
+    return Math.max(3, rows - 4 - extra);
   }
 
   attachKeyboard() {
@@ -768,7 +1004,13 @@ export class LiveProgress {
       }
       if (key === 'c' || key === 'C') {
         this.compact = !this.compact;
-        this.draw(true);
+        // While paused the next paint is the user's resume; changing the layout
+        // under a selection would defeat the point of freezing it.
+        if (!this.paused) this.draw(true);
+        return;
+      }
+      if (key === 'p' || key === 'P' || key === ' ') {
+        this.togglePause();
       }
     };
     const onEnd = () => this.detachKeyboard();
@@ -789,7 +1031,7 @@ export class LiveProgress {
     const state = this.keyboard;
     if (!state) return;
     this.keyboard = null;
-    process.off('exit', state.onExit);
+    if (typeof state.onExit === 'function') process.off('exit', state.onExit);
     try {
       state.stdin.off('data', state.onData);
       state.stdin.off('end', state.onEnd);
@@ -805,6 +1047,9 @@ export class LiveProgress {
     this.detachKeyboard();
     if (!this.tty) return;
 
+    // The run is over, so the frozen frame is no longer useful and the held notes
+    // should not be lost. This also paints the final state if the block was paused.
+    this.resumeForEnd();
     if (this.anchored) {
       this.draw(true);
       this.anchored = false;

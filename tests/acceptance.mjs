@@ -26,6 +26,7 @@ const cliRoot = path.resolve(here, '..');
 
 const candidates = [
     process.env.BWDD_ACCEPTANCE_US,
+    path.resolve(cliRoot, '..', 'dokuha-userscript'),
     path.resolve(cliRoot, '..', 'bookwalker-native-downloader'),
     path.resolve(cliRoot, '..', 'us'),
 ].filter(Boolean);

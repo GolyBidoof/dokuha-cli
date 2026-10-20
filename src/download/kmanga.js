@@ -599,7 +599,7 @@ export async function downloadKmanga(task, ctx = {}) {
             //
             // Note this budget is per volume: two volumes running together open two pools,
             // so the total in flight is volumes x sockets x depth. Nothing measures that
-            // product yet; see docs/parallelism.md.
+            // product yet; see docs/architecture.md#the-page-pipeline.
             const count = Math.max(1, Math.min(KM_MAX_SOCKETS, Math.ceil(todo.length / KM_PAGES_PER_SOCKET)));
             if (count > 1) {
                 const rest = await timed(ctx.timer, 'handshake', () => Promise.all(

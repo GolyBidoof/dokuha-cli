@@ -7,7 +7,7 @@ Most volumes need nothing at all. This page is about the two stores that do, wha
 CMOA, ebookjapan, BookWalker and k-manga all publish a free volume or a 試し読み preview for a title, and this CLI takes them anonymously:
 
 ```sh
-dokuha 'https://www.cmoa.jp/title/000000/' --series
+dokuha 'https://www.cmoa.jp/title/249001/' --series
 ```
 
 No cookies, no login, no flags. With `--download-samplers` the series walk carries on past the free volumes into each remaining volume's preview, which is written to its own `（試し読み）` folder so it can never overwrite the whole volume.
@@ -88,7 +88,7 @@ This build has no browser, so it cannot sign in for you. Sign in normally and pa
 
 ### Free and sampler handshakes are cached
 
-After a free or sampler handshake succeeds, the licence is written to a state file so a later run of the same volume does not handshake again. A signed-in run for a paid title does not write a cached licence, and does not read one.
+After an anonymous or sampler handshake succeeds, the licence is written so a later run of the same volume does not handshake again. The cache is keyed per content id (and per sampler), and a paid-title run with cookies neither reads nor writes it. A licence is valid until the signed policy expires, which is usually about ten minutes.
 
 The cache can be moved or disabled:
 
@@ -107,7 +107,7 @@ The cache can be moved or disabled:
 2. Copy the cookies as cURL from any page on that site.
 3. Pass them with `--kindle-cookie`.
 
-The session is saved to `~/.bwdd-cli/kindle-session.json`, written `0600` inside a `0700` directory, and reused on later runs. Point it elsewhere with `--kindle-state FILE`, or turn it off with `--no-state` to force a fresh handshake every run.
+The session is saved to `~/.bwdd-cli/kindle-session.json`, written `0600` inside a `0700` directory, and reused on later runs. Point it elsewhere with `--kindle-state FILE`, or turn it off with `--no-state` to force a fresh handshake every run. Amazon rotates some session cookies on use; the CLI absorbs the replacements and persists them, so a working session keeps working.
 
 If the run stops with "Kindle needs signed-in read.amazon.co.jp cookies, and none were found", the message that follows says which source was consulted and where the file is, so you know whether to refresh the cookie or delete the cache.
 
@@ -118,20 +118,21 @@ A Kindle Unlimited volume is borrowed, not owned, and the CLI borrows it, downlo
 - **No extra cookies.** Unlimited rides on the same `read.amazon.co.jp` session as everything else. There is nothing separate to configure.
 - **Loans are capped at six open at a time.** The queue in front of the borrow slot respects that ceiling and returns each volume as soon as it is on disk, so a long run does not accumulate loans. `--bridge-parallel` widens or narrows the bridge stage, not this.
 - **A volume that cannot be borrowed is skipped, not failed.** A title outside your subscription resolves to a skip with a reason, and the run carries on. The same is true when a loan is refused because every slot is busy.
-- **`--series` walks by borrowing forward.** A Kindle series walk is one request per volume rather than one listing page, so it is the slowest discovery in the CLI. The walk stops at the end of the series, bounded internally at 200 volumes.
+- **`--series` discovers the whole list first.** A Kindle series walk reads the volume list in one `seriesAsinList` request and classifies every volume's access concurrently, bounded at 200 volumes; only the volumes it takes are then borrowed one at a time for download.
 
 If a borrowed volume reports that Unlimited is unavailable when you expected it to be, the usual cause is an expired session rather than an expired subscription: refresh the cookies first, and only then look at the account.
 
 ## Housekeeping
 
-Session and licence material lives under `~/.bwdd-cli/`:
+Session and licence material lives under `~/.bwdd-cli/`, unless a flag moves it:
 
 | Path | What it is |
 | --- | --- |
 | `kindle-session.json` | your `read.amazon.co.jp` cookie header, `0600` |
-| `free-session.json` | cached BookWalker licences for free and sampler handshakes |
+| `free-session.json` | the saved anonymous BookWalker session cookies |
+| `licence-<cid>.json` | one cached BookWalker licence per content id (and `-sample`) beside that session file |
 
-Both are covered by `.gitignore` in this repository, by name, so a stray copy cannot be committed by accident. `.bwdd-cli/`, `licence-*.json` and `kindle-session.json` are the names to check before sharing anything.
+`.bwdd-cli/`, `licence-*.json` and `kindle-session.json` are covered by `.gitignore` in this repository, by name, so a stray copy cannot be committed by accident. Check those names before sharing anything.
 
 ## When a signed-in run stops working
 

@@ -156,6 +156,10 @@ export function canExpandSeries(det) {
 }
 
 export function rowLabel(task) {
+    // A series walk already read the volume title from the store's listing. Showing
+    // the id until the adapter's first metadata event landed left BookWalker series
+    // rows as UUIDs for the whole handshake, seconds after the title was known.
+    if (task.title) return task.title;
     if (task.kind === 'cmoa') return task.target;
     if (task.kind === 'bookwalker') return task.cid || task.target;
     if (task.kind === 'kindle') return task.asin || task.target;

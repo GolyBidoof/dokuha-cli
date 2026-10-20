@@ -14,6 +14,7 @@
  */
 import http from 'node:http';
 import https from 'node:https';
+import path from 'node:path';
 
 /**
  * Client-side politeness. The bridge throttles itself with semaphores rather
@@ -335,7 +336,10 @@ export class BridgeClient {
     const r = await request(this.baseUrl, 'GET', `/session/${encodeURIComponent(sessionId)}/status`,
       { timeoutMs, json: true });
     if (r.status !== 200) {
-      const error = new Error(`status ${r.status}`);
+      // Keep the body: a 400 here means the bridge still has a *finalized* record
+      // on disk, which is different from a 404 for a session that finished and was
+      // cleaned up, and the caller has to tell those apart to skip instead of fail.
+      const error = new Error(`status ${r.status}: ${(r.text || '').slice(0, 200)}`);
       error.status = r.status;
       throw error;
     }
@@ -424,28 +428,59 @@ export class BridgeClient {
  */
 export async function resolveDestination(client, { dest = null, folder = null } = {}) {
   const info = await client.destinations();
-  const methods = info.methods || [];
-  const configured = methods.filter(m => m.configured).map(m => m.id);
+  const rows = Array.isArray(info.methods) ? info.methods : [];
+  const configured = rows.filter(m => m.configured).map(m => m.id);
   const fallback = info.upload_method_default || 'local';
+  const configuredRow = (id) => rows.find(m => m.id === id && m.configured) || null;
 
   let method = (dest || 'default').trim().toLowerCase();
   if (method === 'default' || method === 'last' || method === 'bridge') method = fallback;
 
-  // "mega" / "local" / "drive:main" / "onedrive:uni-2"
+  // The bridge renamed account ids from `provider:name` to aliases such as
+  // `provider-name`, and still accepts the historical spelling as input. Resolve
+  // either spelling against what this bridge reports before validating, so an
+  // existing script keeps working on both id generations and an alias is not
+  // mistaken for a typo. An unknown name is still rejected here, at startup,
+  // rather than after the download; a colon id never falls back to the provider's
+  // first account, because that would silently retarget a typo.
+  //
+  // `/upload-methods` also reports each account's `provider` and its storage
+  // `account` name, which is the only way to resolve a historical `provider:name`
+  // after the account's alias was renamed: the alias no longer derives from the
+  // name. Older bridges report only ids, so the derived alias (with underscores
+  // turned into hyphens, as the bridge derives it) and then the literal colon id
+  // remain the fallbacks.
+  const legacy = /^([a-z0-9]+):([a-z0-9_-]+)$/.exec(method);
+  let row = configuredRow(method);
+  if (!row && legacy) {
+    const [, provider, name] = legacy;
+    const alias = name === 'default' ? provider : `${provider}-${name.replace(/_/g, '-')}`;
+    row = configuredRow(alias)
+      || rows.find(m => m.configured && m.provider === provider && m.account === name)
+      || configuredRow(`${provider}:${name}`);
+  }
+  const resolved = row ? row.id : null;
   const base = method.split(':')[0];
-  if (base !== 'local' && !configured.includes(method)) {
+  if (base !== 'local' && !resolved) {
     throw new Error(
-      `destination "${dest}" is not configured on the bridge ` +
-      `(available: ${configured.join(', ') || 'none'})`);
+      dest === null
+        ? `the bridge's default destination "${fallback}" is not configured `
+          + `(available: ${configured.join(', ') || 'none'})`
+        : `destination "${dest}" is not configured on the bridge `
+          + `(available: ${configured.join(', ') || 'none'})`);
   }
   if (base === 'local' && !configured.includes('local')) {
     throw new Error('the bridge has no local output configured');
   }
 
-  const params = { uploadMethod: method === 'local' ? 'local' : method };
-  if (method === 'local' && folder) params.localDir = folder;
-  return { method, params, available: configured, defaultMethod: fallback,
-           currentFolder: (methods.find(m => m.id === method) || {}).current_folder || null };
+  const chosen = base === 'local' ? 'local' : resolved;
+  const params = { uploadMethod: chosen };
+  // A relative `--dest-folder` resolved on the bridge landed in the bridge's own
+  // working directory. Resolve it against this process here, the single place both
+  // the CLI and the vendored engine build their finalize parameters.
+  if (chosen === 'local' && folder) params.localDir = path.resolve(String(folder));
+  return { method: chosen, params, available: configured, defaultMethod: fallback,
+           currentFolder: (rows.find(m => m.id === chosen) || {}).current_folder || null };
 }
 
 export function describeDestinations(info) {

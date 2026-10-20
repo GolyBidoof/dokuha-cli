@@ -11,7 +11,7 @@
  *
  * `handshake` is serial, so it is wall time. The rest are summed across concurrent
  * page workers and are therefore aggregates, not a partition of the run -- see
- * docs/phase-timing.md.
+ * docs/performance.md#the-phase-model.
  */
 export const PHASES = ['handshake', 'prework', 'fetch', 'rebuild', 'write'];
 

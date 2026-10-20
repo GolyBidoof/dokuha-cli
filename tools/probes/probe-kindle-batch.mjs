@@ -1,7 +1,7 @@
 // What is the Kindle render service's real per-request page limit, and what does it
 // say when you exceed it? Also tests bundleImages.
 //
-//   node scripts/probes/probe-kindle-batch.mjs <ASIN>
+//   node tools/probes/probe-kindle-batch.mjs <ASIN>
 import { USER_AGENT } from '../../src/user-agent.js';
 import { KINDLE_ORIGIN, kindleRenderUrl, kindleReadTar, kindleWindowViewCount, kindleWindowMeta } from '../../src/download/kindle-protocol.js';
 import { openKindleVolume, loadKindleSession } from '../../src/download/kindle.js';

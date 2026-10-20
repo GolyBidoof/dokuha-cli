@@ -1,7 +1,7 @@
 {
   "name": "dokuha-cli",
-  "version": "0.1.1",
-  "description": "読破 (dokuha) — browserless CLI that downloads volumes from BookWalker, CMOA, ebookjapan, Kindle and k-manga, and can hand them to mokuro-bridge for OCR.",
+  "version": "1.0.0",
+  "description": "\u8aad\u7834 (dokuha) \u2014 browserless CLI that downloads volumes from BookWalker, CMOA, ebookjapan, Kindle and k-manga, and can hand them to mokuro-bridge for OCR.",
   "keywords": [
     "manga",
     "comic",
@@ -47,8 +47,10 @@
   "scripts": {
     "test": "node tests/run.mjs",
     "test:acceptance": "node tests/acceptance.mjs",
-    "engines:test": "node vendor/cmoa/test/run.mjs",
-    "bench:phases": "node scripts/bench-phases.mjs"
+    "bench:phases": "node tools/bench-phases.mjs",
+    "bump": "node tools/bump.mjs",
+    "notes": "node tools/release-notes.mjs",
+    "test:engine": "node vendor/cmoa/test/run.mjs"
   },
   "optionalDependencies": {
     "sharp": "^0.35.5"

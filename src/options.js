@@ -67,18 +67,18 @@ const BASE_OPTIONS = [
     { name: 'series', type: 'boolean', group: 'Selection', help: 'treat every URL as an entry point into its series and download only the volumes that are free in full' },
     { name: 'download-samplers', type: 'boolean', group: 'Selection', help: "with --series, carry on past the free volumes and take each remaining volume's 試し読み sampler, as far as the series goes" },
 
-    { name: 'out', short: 'o', type: 'string', arg: 'DIR', group: 'Output', default: './library', help: 'where volumes are written' },
+    { name: 'out', short: 'o', type: 'string', arg: 'DIR', group: 'Output', default: './library', help: "where volumes are written (default ./library)" },
     { name: 'no-title-dir', type: 'boolean', group: 'Output', advanced: true, help: 'name each folder after the content id instead of the title' },
     { name: 'zip', type: 'boolean', group: 'Output', advanced: true, help: 'BookWalker only: collect each volume into one .zip instead of writing its pages' },
     { name: 'flat', type: 'boolean', group: 'Output', advanced: true, help: 'write pages straight into --out' },
-    { name: 'dry-run', type: 'boolean', group: 'Output', help: 'list what would be downloaded, then stop' },
+    { name: 'dry-run', type: 'boolean', group: 'Output', help: 'list what would be downloaded, then stop (the list is a table even with --json)' },
     { name: 'force', type: 'boolean', group: 'Output', help: 're-download pages that already exist and overwrite an existing destination' },
-    { name: 'json', type: 'boolean', group: 'Output', help: 'machine-readable summary on stdout' },
-    { name: 'quiet', type: 'boolean', group: 'Output', help: 'no progress redraws' },
-    { name: 'no-progress', type: 'boolean', group: 'Output', advanced: true, help: 'print one plain line per volume instead of the live block' },
+    { name: 'json', type: 'boolean', group: 'Output', help: 'machine-readable summary on stdout after a real run' },
+    { name: 'quiet', type: 'boolean', group: 'Output', help: 'no live block and no closing summary (failures and notes still print)' },
+    { name: 'no-progress', type: 'boolean', group: 'Output', advanced: true, help: 'print one plain line per volume instead of the live block (in the block, c compacts and p pauses for copying)' },
 
     { name: 'parallel', type: 'string', arg: 'N', group: 'Concurrency', help: 'how many volumes to work on at once (default: all of them, as fast as the machine allows)' },
-    { name: 'jobs', type: 'string', arg: 'N', group: 'Concurrency', advanced: true, help: 'render workers across all CMOA volumes (default: cores - 1, divided by the volumes running at once)' },
+    { name: 'jobs', type: 'string', arg: 'N', group: 'Concurrency', advanced: true, help: 'render workers for each running CMOA volume (default: cores - 1, divided by the volumes running at once; an explicit N is per volume)' },
     { name: 'concurrency', type: 'string', arg: 'N', group: 'Concurrency', advanced: true, help: 'set the per-store page concurrency at once' },
     { name: 'push-concurrency', type: 'string', arg: 'N', group: 'Concurrency', advanced: true, help: `pages pushed to mokuro-bridge at once (default ${DEFAULTS.pushConcurrency})` },
 
@@ -106,7 +106,7 @@ const BASE_OPTIONS = [
 
     { name: 'mokuro', type: 'boolean', group: 'mokuro-bridge (OCR)', help: 'push every volume through the bridge; without it, resume matching existing bridge sessions only' },
     { name: 'bridge', type: 'string', arg: 'URL', group: 'mokuro-bridge (OCR)', advanced: true, help: 'bridge base URL (default: auto-discover :62642)' },
-    { name: 'dest', type: 'string', arg: 'METHOD', group: 'mokuro-bridge (OCR)', advanced: true, help: 'local, mega, drive, ... (default: the bridge owns it; naming one here also makes it the bridge\u2019s default for every later run)' },
+    { name: 'dest', type: 'string', arg: 'METHOD', group: 'mokuro-bridge (OCR)', advanced: true, help: 'bridge destination id or account alias: local, mega, drive, onedrive, webdav, rclone, mega-work (default: the bridge owns it; naming one here also makes it the bridge\u2019s default for every later run)' },
     { name: 'dest-folder', type: 'string', arg: 'DIR', group: 'mokuro-bridge (OCR)', advanced: true, help: 'folder to use when --dest is local; a relative path is resolved on this machine, not the bridge' },
     { name: 'ocr-wait', type: 'string', arg: 'SECONDS', group: 'mokuro-bridge (OCR)', advanced: true, help: `how long to wait for OCR (default ${DEFAULTS.ocrWaitSeconds})` },
     { name: 'bridge-parallel', type: 'string', arg: 'N', group: 'mokuro-bridge (OCR)', advanced: true, help: 'bridge/OCR volumes at once or unlimited (default: the same as --parallel)' },

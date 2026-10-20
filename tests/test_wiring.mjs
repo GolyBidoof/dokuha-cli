@@ -412,4 +412,36 @@ try {
         path.basename(await volumeFolder(base, { title: 'a/b', id: 'cid', sanitize: () => 'fixed' })), 'fixed');
 }
 
+// ---------------------------------------------------------------------------
+// The progress block is told what kind of run it is reporting
+// ---------------------------------------------------------------------------
+{
+    const runSource = fs.readFileSync(new URL('../src/run.js', import.meta.url), 'utf8');
+    // Without this a plain download is measured with the mokuro stage weights and its
+    // footer bar and percentage disagree for the whole run.
+    check('the live block is told whether a bridge stage follows',
+        /pipelineExpected:\s*Boolean\(config\.mokuro\)/.test(runSource),
+        'run.js does not tell the block that a plain download has no OCR stage');
+    // A resumed bridge session is not the same as a bridge that will report progress:
+    // most of the sessions the bridge remembers belong to other titles. The weights
+    // must flip only when one of this run's rows actually reaches a bridge phase.
+    check('a remembered bridge session does not switch the weights before it matches',
+        !/progress\.pipelineExpected\s*=\s*true/.test(runSource),
+        'run.js switches every resume-only run to the pipeline weights');
+
+    // The block has no `stop`; a guarded call to it was silently doing nothing.
+    check('the bridge failure path stops the ticker it actually has',
+        !/progress\?\.stop\?\.\(\)/.test(runSource) && /progress\?\.stopTicker\(\)/.test(runSource),
+        'run.js calls a non-existent progress.stop');
+
+    // A series walk already read the title from the store listing. The row label used
+    // to be the id anyway, so BookWalker series rows were UUIDs through the handshake.
+    const { rowLabel } = await import('../src/platforms/index.js');
+    checkEqual('a series row shows the title the walk already read',
+        rowLabel({ kind: 'bookwalker', target: 'uuid-1', cid: 'uuid-1', title: '姉のともだち 2' }),
+        '姉のともだち 2');
+    checkEqual('a task with no title still falls back to its id',
+        rowLabel({ kind: 'bookwalker', target: 'uuid-1', cid: 'uuid-1' }), 'uuid-1');
+}
+
 finish();

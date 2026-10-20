@@ -321,11 +321,14 @@ async function measureOutput(target) {
     return { bytes, directory: true };
 }
 
-function reportBookwalker(event, task, progress, bridged = false) {
+export function reportBookwalker(event, task, progress, bridged = false) {
     const key = task.key;
     switch (event.type) {
         case 'book-total':
-            progress?.update(key, { total: event.total, label: event.title || task.title });
+            // The page total arrives as the fetch starts. Claiming the phase here is
+            // what every other store does at the same point; waiting for the first
+            // page kept the row saying "waiting" for the first second of the download.
+            progress?.update(key, { phase: 'downloading', total: event.total, label: event.title || task.title });
             break;
         case 'download-progress':
 

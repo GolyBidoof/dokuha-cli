@@ -6,11 +6,11 @@
  * throwaway harness: it runs `bin/dokuha.mjs --json` per store and prints what each
  * adapter attributed to `handshake`, `prework`, `fetch`, `rebuild` and `write`.
  *
- *   node scripts/bench-phases.mjs                 # all five, one free volume each
- *   node scripts/bench-phases.mjs cmoa bookwalker # a subset
- *   node scripts/bench-phases.mjs --no-descramble # keep the scrambled mosaic
+ *   node tools/bench-phases.mjs                 # all five, one free volume each
+ *   node tools/bench-phases.mjs cmoa bookwalker # a subset
+ *   node tools/bench-phases.mjs --no-descramble # keep the scrambled mosaic
  *
- * Read `docs/phase-timing.md` before quoting a number from this: the phases do
+ * Read `docs/performance.md` before quoting a number from this: the phases do
  * not all mean the same thing, and two of them are aggregates rather than wall time.
  */
 import { spawn } from 'node:child_process';
@@ -88,5 +88,5 @@ for (const { name, record } of rows) {
         + '\n',
     );
 }
-process.stdout.write('\nA phase is blank when that store cannot measure it; see docs/phase-timing.md.\n');
+process.stdout.write('\nA phase is blank when that store cannot measure it; see docs/performance.md.\n');
 process.stdout.write(`Pages were written to ${out}\n`);

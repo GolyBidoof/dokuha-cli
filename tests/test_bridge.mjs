@@ -10,7 +10,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { contentTypeFor, finalizeWithProgress, isIngestableFolder, pageFiles, pushToBridge, startBridgeSession } from '../src/bridge.js';
+import { bridgeSessionState, contentTypeFor, finalizeWithProgress, isIngestableFolder, normalizeUploads, pageFiles, pushToBridge, resumeExistingSession, startBridgeSession } from '../src/bridge.js';
+import { LiveProgress } from '../src/live-progress.js';
+import { resolveDestination } from '../vendor/ebookjapan/bridge.mjs';
 import { check, checkEqual, finish } from './_harness.mjs';
 
 // Content types must cover every extension an engine can write, and must never
@@ -122,6 +124,21 @@ import { check, checkEqual, finish } from './_harness.mjs';
     };
     try { await startBridgeSession(unauthorised, 'volume 1'); } catch (e) { auth = e; }
     check('a 401 is not mistaken for a refusal', auth?.status === 401);
+
+    // A refusal followed by a bridge that cannot answer the session check must still
+    // be a skip. The recovery read the caller's context without taking it as a
+    // parameter, so this path threw ReferenceError and failed the volume instead.
+    const unavailable = {
+        startSession: async () => { const e = new Error('Session is finalizing or already finalized'); e.status = 409; throw e; },
+        sessions: async () => { throw new Error('bridge went away'); },
+        queue: async () => ({ per_session: [] }),
+    };
+    let unreachable = null;
+    try { unreachable = await startBridgeSession(unavailable, 'volume 1', { ctx: { bridgeResume: new Map() } }); }
+    catch (e) { unreachable = e; }
+    check('an unreachable session check is a skip, not a crash',
+        unreachable?.alreadyHandled === true,
+        unreachable instanceof Error ? unreachable.message : String(unreachable));
 
     // Reuse is only skipped when it was actually requested.
     let asked = null;
@@ -287,6 +304,22 @@ import { check, checkEqual, finish } from './_harness.mjs';
         check('a local destination does not delete the file',
             /delete_after_upload=false/.test(received?.body || ''), received?.body);
         check('a missing progress sink is tolerated', true);
+
+        // --force means "replace what is at the destination". The bridge's collision
+        // policy has no boolean form: a literal `true` is neither `skip` nor
+        // `overwrite`, so providers treated it as `fail` and the retry died with
+        // "destination already exists" after the OCR work was already done.
+        await finalizeWithProgress(client, 'sess-3', 'k',
+            { method: 'mega', params: { uploadMethod: 'mega' } }, { progress: null, overwrite: true });
+        check('--force sends the bridge\'s overwrite policy',
+            /overwrite=overwrite/.test(received?.body || ''), received?.body);
+        check('--force is not sent as a boolean',
+            /overwrite=true/.test(received?.body || '') === false, received?.body);
+
+        await finalizeWithProgress(client, 'sess-4', 'k',
+            { method: 'mega', params: { uploadMethod: 'mega' } }, { progress: null, overwrite: false });
+        check('a normal run leaves the collision policy at the bridge default',
+            /overwrite=/.test(received?.body || '') === false, received?.body);
     } finally {
         await new Promise((r) => server.close(r));
     }
@@ -507,6 +540,324 @@ import { check, checkEqual, finish } from './_harness.mjs';
     checkEqual('the conflict is recovered as a folder session', record.ingest, 'folder');
     checkEqual('the transient page conflict does not fail the volume', record.pagesFailed, 0);
     fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// Re-runs, finished sessions and the terminal partial-upload status
+// ---------------------------------------------------------------------------
+
+// `--force` means "do it again". A completion receipt left by a successful earlier
+// run must not short-circuit the hand-off when the user asked to replace the
+// destination copies.
+{
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dokuha-force-'));
+    fs.writeFileSync(path.join(dir, 'page-0001.jpg'), 'a');
+    fs.writeFileSync(path.join(dir, 'page-0002.jpg'), 'b');
+    const target = { key: 'force', title: 'Volume force', folder: dir };
+    const success = {
+        baseUrl: 'http://127.0.0.1:62642',
+        async resumeSession() {
+            return { session_id: 'sess-force', synced_from_source: 2, queued_for_ocr: 2, ocr_cached: 0 };
+        },
+        async finalize() { return { status: 'success', output_dir: '/out', pages_ocr_done: 2 }; },
+    };
+    try {
+        const first = await pushToBridge(success, { method: 'local', params: {} }, target,
+            { progress: null, pushConcurrency: 1 });
+        checkEqual('the first hand-off completes normally', first.completed, true);
+
+        // A plain re-run trusts the receipt and never touches the bridge.
+        let plainResume = 0;
+        const plain = await pushToBridge({
+            ...success,
+            async resumeSession() { plainResume++; return { session_id: 'x' }; },
+        }, { method: 'local', params: {} }, target, { progress: null, pushConcurrency: 1 });
+        checkEqual('a plain re-run trusts the completion receipt', plain.ingest, 'already-completed');
+        checkEqual('and does not call the bridge', plainResume, 0);
+
+        // --force must re-run it.
+        let forcedResume = 0;
+        const forced = await pushToBridge({
+            ...success,
+            async resumeSession() {
+                forcedResume++;
+                return { session_id: 'sess-force-2', synced_from_source: 2, queued_for_ocr: 0, ocr_cached: 2 };
+            },
+        }, { method: 'local', params: {} }, target, { progress: null, pushConcurrency: 1, overwrite: true });
+        checkEqual('--force re-runs the hand-off instead of trusting the receipt',
+            forcedResume, 1);
+        checkEqual('--force reports the new hand-off path', forced.ingest, 'folder');
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+}
+
+// A persisted session that reached its terminal state but could not be removed
+// answers 400 "Session already finalized" (a 404 is a session that finished and was
+// cleaned up). Both mean the work is done; neither may crash the volume.
+{
+    const files = [{ path: '/nowhere/page_0001.jpg' }];
+    const existing = { alreadyHandled: true, existingSession: { session_id: 's-fin' }, queue: null };
+    const status400 = {
+        baseUrl: 'http://127.0.0.1:62642',
+        async status() {
+            const error = new Error('status 400: {"detail":"Session already finalized"}');
+            error.status = 400;
+            throw error;
+        },
+    };
+    const finished = await resumeExistingSession(status400, { method: 'local', params: {} },
+        { key: 'k', title: 'Volume fin' }, files, existing, {});
+    check('a finalized bridge record is a skip, not a crash',
+        finished?.alreadyHandled === true && finished.ingest === 'already-completed',
+        JSON.stringify(finished));
+
+    // The same 400 can come back from finalize when another client finalized first.
+    const finalizedElsewhere = {
+        baseUrl: 'http://127.0.0.1:62642',
+        async status() {
+            return { pages_received: 2, pages_ocr_done: 2, pages_ocr_pending: 0, ingesting: false, finalizing: false };
+        },
+        async queue() { return { per_session: [] }; },
+        async finalize() {
+            const error = new Error('finalize 400: {"detail":"Session already finalized"}');
+            error.status = 400;
+            throw error;
+        },
+    };
+    const skipped = await resumeExistingSession(finalizedElsewhere, { method: 'local', params: {} },
+        { key: 'k', title: 'Volume fin' }, files, { alreadyHandled: true, existingSession: { session_id: 's-fin-2' } }, {});
+    check('a session finalized by another client is a skip',
+        skipped?.alreadyHandled === true && /another client/.test(skipped.existingState || ''),
+        JSON.stringify(skipped));
+}
+
+// A terminal `partial_upload` means the volume files arrived but the series index did
+// not. The bridge calls that a failure; the client must too, or a folder the reader
+// cannot build is reported as a success.
+{
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dokuha-partial-'));
+    fs.writeFileSync(path.join(dir, 'page-0001.jpg'), 'a');
+    try {
+        const client = {
+            baseUrl: 'http://127.0.0.1:62642',
+            async resumeSession() {
+                return { session_id: 'sess-partial', synced_from_source: 1, queued_for_ocr: 0, ocr_cached: 1 };
+            },
+            async finalize() {
+                return {
+                    status: 'partial_upload',
+                    message: 'Could not update series.json: permission denied',
+                    pages_ocr_done: 1,
+                    uploads: [
+                        { file: 'v.webp', bytes: 10, total_bytes: 10, success: true },
+                        { file: 'v.cbz', bytes: 20, total_bytes: 20, success: true },
+                    ],
+                };
+            },
+        };
+        const record = await pushToBridge(client, { method: 'mega', params: { uploadMethod: 'mega' } },
+            { key: 'partial', title: 'Partial volume', folder: dir }, { progress: null, pushConcurrency: 1 });
+        checkEqual('a partial upload is marked partial', record.partial, true);
+        checkEqual('a partial upload keeps the terminal status', record.status, 'partial_upload');
+        checkEqual('a partial upload is not completed', record.completed, false);
+        checkEqual('the bridge reason is carried with the record',
+            record.message, 'Could not update series.json: permission denied');
+        checkEqual('remote upload sizes are normalised into the record',
+            record.outputFiles.map((item) => item.size), [10, 20]);
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Destination ids across the bridge's account-alias rename
+// ---------------------------------------------------------------------------
+
+// The bridge now reports account aliases (`mega-work`, `webdav`) and accepts the
+// historical `mega:work` spelling as input. Validating the raw spelling against the
+// reported ids rejected the old form before the bridge ever saw it, so an existing
+// multi-account script broke on the alias release. Both spellings must resolve, and
+// an unknown account must still fail here rather than after a whole download.
+{
+    const client = (ids, fallback = 'mega') => ({
+        destinations: async () => ({
+            upload_method_default: fallback,
+            methods: ids.map((id) => ({ id, configured: true, current_folder: id === 'webdav' ? '/dav' : null })),
+        }),
+    });
+    const oldIds = client(['local', 'mega', 'mega:work', 'drive']);
+    const aliasIds = client(['local', 'mega', 'mega-work', 'webdav']);
+    const resolve = (bridge, dest, folder = null) => resolveDestination(bridge, { dest, folder });
+
+    checkEqual('the historical colon id still resolves against the old bridge',
+        (await resolve(oldIds, 'mega:work')).method, 'mega:work');
+    checkEqual('the historical colon id resolves to the alias on the new bridge',
+        (await resolve(aliasIds, 'mega:work')).method, 'mega-work');
+    checkEqual('the alias itself resolves', (await resolve(aliasIds, 'mega-work')).method, 'mega-work');
+    checkEqual('provider:default resolves to the bare provider',
+        (await resolve(aliasIds, 'mega:default')).method, 'mega');
+    checkEqual('a bare provider resolves', (await resolve(aliasIds, 'mega')).method, 'mega');
+    checkEqual('a new provider id resolves once configured',
+        (await resolve(aliasIds, 'webdav')).method, 'webdav');
+    checkEqual('the bridge default is used when no destination is named',
+        (await resolve(aliasIds, null)).method, 'mega');
+    checkEqual('an alias keeps its bridge folder for display',
+        (await resolve(aliasIds, 'webdav')).currentFolder, '/dav');
+
+    // A colon typo must not fall back to the provider's first account: that would
+    // silently upload to the wrong account instead of reporting the mistake.
+    let unknown = null;
+    try { await resolve(aliasIds, 'mega:nope'); } catch (error) { unknown = error; }
+    check('an unknown colon account is rejected before the run',
+        unknown instanceof Error && /not configured/.test(unknown.message),
+        unknown ? unknown.message : 'no error');
+
+    const local = await resolve(aliasIds, 'local', '/tmp/dokuha-out');
+    checkEqual('local keeps its folder argument', local.params.localDir, '/tmp/dokuha-out');
+    checkEqual('local is passed through unchanged', local.params.uploadMethod, 'local');
+    // The bridge ignores local_dir for a remote method; the client must not send it,
+    // or a folder argument silently looks applied when it is not.
+    const remoteWithFolder = await resolve(aliasIds, 'mega', '/tmp/dokuha-out');
+    checkEqual('a remote destination never receives a local folder',
+        remoteWithFolder.params.localDir, undefined);
+
+    // A relative --dest-folder used to be sent as-is, so the bridge resolved it
+    // against its own working directory instead of the directory dokuha ran in.
+    const relative = await resolve(aliasIds, 'local', './out/relative');
+    checkEqual('a relative --dest-folder is resolved on this machine',
+        relative.params.localDir, path.resolve('./out/relative'));
+
+    // `/upload-methods` reports each account's provider and storage name as well as
+    // its alias. That is the only way to resolve the historical `provider:name`
+    // spelling once an account's alias was renamed (the alias no longer derives from
+    // the name at all), and the bridge turns underscores in a storage name into
+    // hyphens in the alias.
+    const rows = (entries, fallback = 'mega') => ({
+        destinations: async () => ({ upload_method_default: fallback, methods: entries }),
+    });
+    const renamed = rows([
+        { id: 'local', configured: true },
+        { id: 'mega', configured: true, provider: 'mega', account: 'default' },
+        { id: 'work-archive', configured: true, provider: 'mega', account: 'work' },
+        { id: 'mega-my-work', configured: true, provider: 'mega', account: 'my_work' },
+        { id: 'drive', configured: false, provider: 'drive', account: 'default' },
+    ]);
+    checkEqual('a renamed alias still resolves from its historical colon spelling',
+        (await resolve(renamed, 'mega:work')).method, 'work-archive');
+    checkEqual('an underscore storage name resolves to its hyphenated alias',
+        (await resolve(renamed, 'mega:my_work')).method, 'mega-my-work');
+    checkEqual('provider:default resolves through the reported account',
+        (await resolve(renamed, 'mega:default')).method, 'mega');
+    let unconfigured = null;
+    try { await resolve(renamed, 'drive'); } catch (error) { unconfigured = error; }
+    check('a reported but unconfigured account is still rejected',
+        unconfigured instanceof Error && /not configured/.test(unconfigured.message),
+        unconfigured ? unconfigured.message : 'no error');
+}
+
+// ---------------------------------------------------------------------------
+// The finalize stream feeds the footer's size totals
+// ---------------------------------------------------------------------------
+
+// Each upload event carries the file's total size, and the terminal `done` frame is
+// the only place the per-series series.json size exists. The progress block collects
+// both so the footer can total the manga and its artifacts without re-reading disk.
+{
+    const stream = { isTTY: false, columns: 120, rows: 30, write() {}, on() {}, off() {} };
+    const progress = new LiveProgress({ stream, width: 120 });
+    progress.add('k', { tag: 'BW', label: 'volume' });
+
+    const doneFrame = {
+        stage: 'done',
+        status: 'success',
+        uploads: [
+            { file: 'volume.webp', size: 1000, success: true },
+            { file: 'volume.cbz', size: 9000, success: true },
+            { file: 'volume.mokuro', size: 500, success: true },
+            { file: 'series.json', size: 100, success: true },
+        ],
+    };
+    const client = {
+        async finalize(sessionId, { onEvent }) {
+            for (const [file, size] of [['volume.webp', 1000], ['volume.cbz', 9000], ['volume.mokuro', 500]]) {
+                onEvent({
+                    stage: 'upload_progress',
+                    upload: { file, total_bytes: size, current_bytes: size, percent: 100, speed_human: '1 MiB/s' },
+                });
+            }
+            onEvent(doneFrame);
+            return doneFrame;
+        },
+    };
+    await finalizeWithProgress(client, 'sess', 'k', { method: 'local', params: {} }, { progress });
+
+    const { artifacts, extras } = progress.totals();
+    checkEqual('upload events feed the artifact sizes',
+        JSON.stringify(artifacts), JSON.stringify({ webp: 1000, cbz: 9000, mokuro: 500, series: 100 }));
+    checkEqual('the done frame supplies the series.json size that has no upload event', artifacts.series, 100);
+    checkEqual('extras exclude the archive', extras, 1000 + 500 + 100);
+    check('the artifact footer line is now produced', progress.footer().length === 3,
+        JSON.stringify(progress.footer()));
+}
+
+// A remote `done` frame spells the same sizes differently: the summary the bridge
+// builds for a remote destination carries `bytes`/`total_bytes` and no `size` at all.
+// Reading only `size` dropped the whole artifact footer on exactly the destinations
+// that take minutes to upload, including series.json, which has no upload event.
+{
+    const stream = { isTTY: false, columns: 120, rows: 30, write() {}, on() {}, off() {} };
+    const progress = new LiveProgress({ stream, width: 120 });
+    progress.add('k', { tag: 'BW', label: 'volume' });
+
+    const doneFrame = {
+        stage: 'done',
+        status: 'success',
+        method: 'mega',
+        uploads: [
+            { file: 'volume.webp', bytes: 1000, total_bytes: 1000, current_bytes: 1000, percent: 100, success: true },
+            { file: 'volume.cbz', bytes: 9000, total_bytes: 9000, current_bytes: 9000, percent: 100, success: true },
+            { file: 'volume.mokuro', bytes: 500, total_bytes: 500, current_bytes: 500, percent: 100, success: true },
+            { file: 'series.json', bytes: 100, total_bytes: 100, current_bytes: 100, percent: 100, success: true },
+        ],
+    };
+    const client = { async finalize(sessionId, { onEvent }) { onEvent(doneFrame); return doneFrame; } };
+    await finalizeWithProgress(client, 'sess', 'k', { method: 'mega', params: { uploadMethod: 'mega' } }, { progress });
+
+    const { artifacts } = progress.totals();
+    checkEqual('a remote done frame still totals the artifacts from total_bytes',
+        JSON.stringify(artifacts), JSON.stringify({ webp: 1000, cbz: 9000, mokuro: 500, series: 100 }));
+
+    const normalized = normalizeUploads(doneFrame.uploads);
+    checkEqual('the record exposes one size spelling',
+        normalized.map((item) => item.size), [1000, 9000, 500, 100]);
+    checkEqual('a local done frame keeps its size', normalizeUploads([{ file: 'a.cbz', size: 7 }])[0].size, 7);
+    checkEqual('a failed entry keeps whatever it reported',
+        normalizeUploads([{ file: 'a.cbz', success: false }])[0].size, undefined);
+}
+
+// The session snapshot's `upload` object is state, not an activity flag: the bridge
+// writes one on the early cover push and leaves `active: false` in it until the
+// remote transfer starts. Treating the object as truthy showed a finished cover push
+// as "bridge uploading" for the whole OCR phase.
+{
+    const session = { session_id: 's1', pages_received: 10, pages_ocr_done: 4, pages_ocr_pending: 6 };
+    const counts = { per_session: [{ session_id: 's1', processing: 1, pending: 5 }] };
+    checkEqual('an inactive upload is not reported as uploading',
+        bridgeSessionState({ ...session, upload: { active: false, file: 'v.webp', percent: 100 } }, counts),
+        'bridge OCR processing 1 page(s), 6 pending');
+    checkEqual('an active upload is reported',
+        bridgeSessionState({ ...session, upload: { active: true, file: 'v.cbz' } }, { per_session: [] }),
+        'bridge uploading v.cbz');
+    checkEqual('a queued session names its queue',
+        bridgeSessionState(session, { per_session: [] }),
+        'bridge OCR queued 6 page(s)');
+    checkEqual('an ingesting session says so',
+        bridgeSessionState({ ...session, source_ingesting: true }, null),
+        'bridge ingesting');
+    checkEqual('a finalizing session says so',
+        bridgeSessionState({ ...session, pages_ocr_pending: 0, pages_ocr_done: 10, finalizing: true }, null),
+        'bridge assembling/uploading after OCR (10 pages)');
 }
 
 finish();

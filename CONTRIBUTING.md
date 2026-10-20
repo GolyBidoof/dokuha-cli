@@ -55,7 +55,7 @@ Comments in this codebase tend to record the reason a thing is the way it is, us
 
 ## Tests
 
-Add a test for anything that could silently regress. The suite discovers 29 test files; 28 run offline and one, the live network check, is skipped unless `DOKUHA_TEST_NETWORK=1` is set. Two rules:
+Add a test for anything that could silently regress. The suite discovers 31 test files; 30 run offline and one, the live network check, is skipped unless `DOKUHA_TEST_NETWORK=1` is set. Two rules:
 
 1. **Default tests must be hermetic.** No network, no bridge, no real credentials. If a test needs a live store, put it in `tests/test_network.mjs`, which is skipped unless `DOKUHA_TEST_NETWORK=1` is set.
 2. **Never write to a real session or output directory.** Use `fs.mkdtempSync(path.join(os.tmpdir(), 'dokuha-'))` and clean it up, and pass `bwNoState: true` in any test context.
@@ -73,4 +73,4 @@ Large commits get a prose body explaining what changed and why, then bullets, an
 
 ## Releasing
 
-Not yet wired up. Until it is, a release is: bump `version` in `package.json`, add a CHANGELOG entry, tag, and push.
+A release is a version bump, a CHANGELOG section, a tag and a push. `npm run bump patch|minor|major|x.y.z` updates `package.json` and the README title, then [RELEASING.md](RELEASING.md) covers what the tag starts, the npm Trusted Publisher setup and the checks a release must pass. Pushing to `main` never publishes.

@@ -8,7 +8,8 @@
  */
 
 import { LiveProgress } from '../src/live-progress.js';
-import { C } from '../src/ansi.js';
+import { reportBookwalker } from '../src/download/bookwalker.js';
+import { C, displayWidth, humanBytes } from '../src/ansi.js';
 import { check, checkEqual, finish } from './_harness.mjs';
 
 /** A fake TTY that records what was written. */
@@ -396,8 +397,10 @@ function fakeStream(rows = 24) {
     check('an untouched batch has no filled cells', !emptyBar.includes('█'), emptyBar);
 
     // A run with no OCR and no upload: the skipped stages must add no colour, so
-    // once the downloads finish the bar is simply full blue.
-    const plain = new LiveProgress({ stream: fakeStream(), width: 100 });
+    // once the downloads finish the bar is simply full blue. `pipelineExpected: false`
+    // is what run.js passes for a plain download; it selects the download-only bar
+    // rather than stage bands.
+    const plain = new LiveProgress({ stream: fakeStream(), width: 100, pipelineExpected: false });
     plain.add('done', {});
     plain.add('mid', {});
     Object.assign(plain.volumes[0], { phase: 'done', total: 100, done: 100 });
@@ -410,6 +413,324 @@ function fakeStream(rows = 24) {
 
     if (savedForce === undefined) delete process.env.FORCE_COLOR;
     else process.env.FORCE_COLOR = savedForce;
+}
+
+// ---------------------------------------------------------------------------
+// A download-only run has one basis for both halves of its footer
+// ---------------------------------------------------------------------------
+
+// The stage weights describe a mokuro run, where the download is only the first 30
+// percent of a volume's journey. Applying them to a plain download made the footer
+// bar and its own percentage disagree for the whole run: a real capture showed a
+// 99 percent blue bar beside 53 percent, and 56 percent at the moment every page
+// had downloaded, because no OCR or upload would ever supply the missing weight.
+// `pipelineExpected: false` makes the pages the run's whole measure.
+{
+    const p = new LiveProgress({ stream: fakeStream(), width: 100, pipelineExpected: false });
+    for (const [label, pages] of [['volume 1', 185], ['volume 2', 22], ['volume 3', 28], ['volume 4', 32], ['volume 5', 30]]) {
+        p.add(label, { tag: 'BW', label });
+    }
+    const [first, ...rest] = p.volumes;
+    Object.assign(first, { phase: 'downloading', total: 185, done: 154 });
+    [22, 28, 32, 30].forEach((pages, index) => {
+        Object.assign(rest[index], { phase: 'done', total: pages, done: pages });
+    });
+
+    const expected = (154 + 22 + 28 + 32 + 30) / (185 + 22 + 28 + 32 + 30);
+    checkEqual('a plain download measures its own pages',
+        p.overallFraction(p.totals()), expected);
+
+    const [barLine] = p.footer();
+    const pct = Number((barLine.match(/(\d+)%/) || [])[1] ?? NaN);
+    checkEqual('the footer percentage is the page fraction', pct, Math.floor(expected * 100));
+    const cells = (barLine.match(/█/g) || []).length;
+    checkEqual('the footer bar fill matches the percentage', cells, Math.round(expected * 92));
+    check('a plain download paints only the download band',
+        !barLine.includes(C.yellow) && !barLine.includes(C.magenta) && !barLine.includes(C.cyan),
+        barLine);
+
+    // The download band of the old weights capped this at 0.3, which is what made a
+    // finished download look 56 percent done.
+    checkEqual('a fetched page counts in full when no bridge follows',
+        p.volumeWeight({ phase: 'downloading', total: 100, done: 100 }), 1);
+
+    // The mokuro weighting is still the default, and a volume that reaches a bridge
+    // phase switches a plain-looking run back to it.
+    const mokuro = new LiveProgress({ stream: fakeStream(), width: 100 });
+    checkEqual('the mokuro weights remain the default',
+        mokuro.volumeWeight({ phase: 'downloading', total: 100, done: 100 }), 0.3);
+    first.phase = 'ocr';
+    checkEqual('a bridge phase turns the pipeline weights back on',
+        p.volumeWeight({ phase: 'downloading', total: 100, done: 100 }), 0.3);
+
+    // A local finalize is not a bridge phase. ebookjapan and BookWalker zip their pages
+    // after the download with no bridge in sight, and treating that as a pipeline made a
+    // download-only run report 88 percent beside a 98 percent bar.
+    first.phase = 'finalizing';
+    checkEqual('a local finalize does not look like a bridge phase',
+        p.pipelineUnderway(), false);
+    checkEqual('a local finalize keeps the download-only weight',
+        p.volumeWeight({ phase: 'downloading', total: 100, done: 100 }), 1);
+    first.phase = 'downloading';
+
+    // At the end of a plain run the bar and the label both read complete.
+    for (const volume of p.volumes) volume.phase = 'done';
+    checkEqual('a finished plain download is complete', p.overallFraction(p.totals()), 1);
+    const [doneLine] = p.footer();
+    checkEqual('the finished footer reads 100 percent',
+        Number((doneLine.match(/(\d+)%/) || [])[1] ?? NaN), 100);
+    checkEqual('the finished bar is full', (doneLine.match(/█/g) || []).length, 92);
+}
+
+// ---------------------------------------------------------------------------
+// The bookwalker row reports the phases it actually reaches
+// ---------------------------------------------------------------------------
+
+// A volume's page total arrives when the fetch starts. BookWalker was the only
+// store that left the row in `queued` until the first page landed, so the download
+// bar appeared a second late. Its failure path also read a row accessor that did
+// not exist and threw instead of counting the bad page.
+{
+    const p = new LiveProgress({ stream: fakeStream(), width: 100 });
+    p.add('k', { tag: 'BW', label: 'uuid' });
+    checkEqual('get returns the row a key belongs to', p.get('k'), p.volumes[0]);
+    checkEqual('get returns null for an unknown key', p.get('nope'), null);
+
+    reportBookwalker({ type: 'book-total', total: 185, title: '姉のともだち 1' }, { key: 'k' }, p);
+    checkEqual('the page total claims the download phase', p.get('k').phase, 'downloading');
+    checkEqual('the page total lands with the phase', p.get('k').total, 185);
+
+    reportBookwalker({ type: 'download-error' }, { key: 'k' }, p);
+    checkEqual('a failed page increments the counter', p.get('k').failed, 1);
+    reportBookwalker({ type: 'download-error' }, { key: 'k' }, p);
+    checkEqual('failed pages accumulate', p.get('k').failed, 2);
+}
+
+// ---------------------------------------------------------------------------
+// The footer never claims more than the run has done
+// ---------------------------------------------------------------------------
+
+// A late page total grows the denominator before its numerator, so the raw fraction
+// can dip. A progress number that goes backwards reads as a bug, so the footer keeps
+// its high water mark.
+{
+    const p = new LiveProgress({ stream: fakeStream(), width: 100, pipelineExpected: false });
+    p.add('a', { label: 'a' });
+    p.add('b', { label: 'b' });
+    Object.assign(p.volumes[0], { phase: 'downloading', total: 100, done: 10 });
+    Object.assign(p.volumes[1], { phase: 'queued' });
+    const pct = () => Number((p.footer()[0].match(/(\d+)%/) || [])[1] ?? NaN);
+    const before = pct();
+    p.volumes[1].total = 1000;
+    check('a newly known volume total cannot step the percentage backwards',
+        pct() >= before, `${before} then ${pct()}`);
+}
+
+// 100 percent waits for the last row to settle; all pages on disk is not a finished
+// run while a row still says "download".
+{
+    const p = new LiveProgress({ stream: fakeStream(), width: 100, pipelineExpected: false });
+    [['v1', 185], ['v2', 22], ['v3', 28], ['v4', 32], ['v5', 30]].forEach(([label, pages]) => p.add(label, { label }));
+    p.volumes.forEach((volume) => Object.assign(volume, { phase: 'done', total: volume.label === 'v1' ? 185 : undefined }));
+    p.volumes[0].phase = 'downloading';
+    p.volumes[0].total = 185;
+    p.volumes[0].done = 185;
+    [22, 28, 32, 30].forEach((pages, index) => Object.assign(p.volumes[index + 1], { total: pages, done: pages, phase: 'done' }));
+    const [line] = p.footer();
+    checkEqual('a fully fetched run is not 100 percent before its last volume is done',
+        Number((line.match(/(\d+)%/) || [])[1] ?? NaN), 99);
+    check('the bar is one cell short of full', (line.match(/█/g) || []).length < 92,
+        `${(line.match(/█/g) || []).length} cells`);
+
+    p.finish('v1');
+    const [doneLine] = p.footer();
+    checkEqual('a settled run reads 100 percent', Number((doneLine.match(/(\d+)%/) || [])[1] ?? NaN), 100);
+}
+
+// A failed volume contributes only what it finished, so one failure cannot make the
+// footer into a false success.
+{
+    const p = new LiveProgress({ stream: fakeStream(), width: 100 });
+    p.add('ok', { label: 'ok' });
+    p.add('bad', { label: 'bad' });
+    Object.assign(p.volumes[0], { phase: 'done', total: 200, done: 200 });
+    Object.assign(p.volumes[1], { phase: 'downloading', total: 200, done: 20 });
+    p.finish('bad', { error: 'fetch failed' });
+    const overall = p.overallFraction(p.totals());
+    check('a failed volume does not weigh as a finished one',
+        Math.abs(overall - (200 + 20) / 400) < 1e-9, String(overall));
+    check('a failed run does not read complete', overall < 0.99, String(overall));
+}
+
+// ---------------------------------------------------------------------------
+// Every stage of a bridge run has a band, including a local one
+// ---------------------------------------------------------------------------
+{
+    const savedForce = process.env.FORCE_COLOR;
+    process.env.FORCE_COLOR = '1';
+    // A local destination never uploads, but it still assembles an archive. The cyan
+    // band used to require a remote destination, so a local run showed a full blue bar
+    // beside rows saying "assembling .mokuro".
+    const local = new LiveProgress({ stream: fakeStream(), width: 100 });
+    local.uploadExpected = false;
+    local.add('v', { label: 'v' });
+    Object.assign(local.volumes[0], { phase: 'finalizing', total: 100, done: 100, ocrTotal: 100, ocr: 100 });
+    const assembling = local.pipelineBar(20);
+    check('a local destination still lights the assemble band',
+        assembling.includes(C.cyan), assembling);
+
+    // And a done volume is green whether or not it uploaded bytes: a skipped or
+    // already-present volume used to leave the whole bar cyan at 100 percent.
+    Object.assign(local.volumes[0], { phase: 'done' });
+    const finished = local.pipelineBar(20);
+    check('a finished volume is green without upload byte counters',
+        finished.includes(C.green), finished);
+    if (savedForce === undefined) delete process.env.FORCE_COLOR;
+    else process.env.FORCE_COLOR = savedForce;
+}
+
+// ---------------------------------------------------------------------------
+// Finalizing stops one cell short until the bridge closes the session
+// ---------------------------------------------------------------------------
+{
+    const p = new LiveProgress({ stream: fakeStream(), width: 100 });
+    p.add('v', { label: 'v' });
+    const volume = p.volumes[0];
+    Object.assign(volume, {
+        phase: 'finalizing', total: 100, done: 100,
+        uploadFile: 'volume.cbz', uploadBytes: 100, uploadBytesTotal: 100,
+        uploadPercent: 100, archiveUploaded: true,
+    });
+    checkEqual('a complete archive transfer is still not a finished volume', p.fraction(volume), 0.99);
+    check('the row meter stays one cell short', (p.meter(volume).match(/█/g) || []).length, 11);
+}
+
+// ---------------------------------------------------------------------------
+// A done volume normalizes its OCR counters
+// ---------------------------------------------------------------------------
+{
+    const p = new LiveProgress({ stream: fakeStream(), width: 100 });
+    p.add('v', { label: 'v' });
+    p.update('v', { phase: 'ocr', ocr: 27, ocrTotal: 28, ocrPending: 1 });
+    p.finish('v');
+    checkEqual('a finished volume has OCR-d everything it received', p.totals().ocr, 28);
+    checkEqual('no OCR page stays pending on a finished volume', p.volumes[0].ocrPending, 0);
+    check('the footer counts every OCR page', p.footer()[1].includes("28 OCR'd"), p.footer()[1]);
+}
+
+// ---------------------------------------------------------------------------
+// A narrow terminal keeps one row per volume
+// ---------------------------------------------------------------------------
+
+// Below roughly 48 columns the fixed columns alone overflowed, and a wrapped row
+// makes the block's redraw clear one line too few.
+{
+    const p = new LiveProgress({ stream: fakeStream(), width: 40 });
+    p.add('v', { tag: 'BW', label: '姉のともだち【期間限定無料】 1' });
+    Object.assign(p.volumes[0], { phase: 'downloading', total: 185, done: 100, bytes: 12_345_678 });
+    const row = p.renderVolume(p.volumes[0]);
+    check('a row fits the terminal it is drawn on',
+        displayWidth(row) <= 40, `${displayWidth(row)} columns: ${row}`);
+}
+
+// ---------------------------------------------------------------------------
+// The live block can be paused so its text can be selected and copied
+// ---------------------------------------------------------------------------
+
+// Every 120 ms redraw moves the cursor and rewrites the same rows, which is what
+// makes a drag-selection jump while a download is running. Pausing stops every paint
+// while the run keeps recording progress; resuming paints the current state and any
+// notes that arrived meanwhile.
+{
+    const stream = fakeStream();
+    const p = new LiveProgress({ stream, width: 100 });
+    // The test runner's stdin is not a TTY, so the real listener cannot install. A
+    // truthy marker is enough for the footer to advertise the keys.
+    p.keyboard = { fake: true };
+    p.add('a', { tag: 'BW', label: 'volume a' });
+    Object.assign(p.volumes[0], { phase: 'downloading', total: 100, done: 10 });
+    p.draw(true);
+
+    p.togglePause();
+    const frozen = stream.written;
+    check('pausing paints a frozen frame', stream.written.length > 0);
+    check('the paused footer marks the block', /paused/.test(frozen), frozen.slice(-200));
+    check('the paused footer offers the resume key', /p: resume/.test(frozen), frozen.slice(-200));
+
+    p.update('a', { done: 40 });
+    p.note('a note that arrived while frozen');
+    p.finish('a');
+    checkEqual('a paused block does not repaint on progress', stream.written.length, frozen.length);
+    checkEqual('progress still lands while paused', p.get('a').done, 40);
+    checkEqual('a finished volume does not repaint a paused block', p.paused, true);
+    check('a note is held, not printed over the frozen block',
+        !stream.written.includes('a note that arrived while frozen'));
+
+    p.togglePause();
+    checkEqual('resume clears the pause', p.paused, false);
+    check('resuming prints the held note',
+        stream.written.includes('a note that arrived while frozen'));
+    check('resuming advertises the pause key again', /p: pause/.test(stream.written.slice(frozen.length)));
+}
+
+// A run that ends while the block is paused must not leave the terminal frozen, and
+// the final frame must still be painted with the held notes above it.
+{
+    const stream = fakeStream();
+    const p = new LiveProgress({ stream, width: 100 });
+    p.keyboard = { fake: true };
+    p.add('a', { tag: 'BW', label: 'volume a' });
+    Object.assign(p.volumes[0], { phase: 'downloading', total: 100, done: 10 });
+    p.draw(true);
+    p.togglePause();
+    p.note('held until the run ends');
+    p.done();
+    checkEqual('the end of a paused run lifts the pause', p.paused, false);
+    check('the end of a paused run prints the held note',
+        stream.written.includes('held until the run ends'));
+}
+
+// ---------------------------------------------------------------------------
+// Sizes: the done row keeps the manga, the footer totals it and the artifacts
+// ---------------------------------------------------------------------------
+{
+    const stream = fakeStream(30);
+    const p = new LiveProgress({ stream, width: 120 });
+    p.add('v', { tag: 'BW', label: 'volume v' });
+    Object.assign(p.volumes[0], { phase: 'done', total: 185, done: 185, bytes: 98_774_085 });
+
+    check('a done row keeps the size of the manga',
+        p.detail(p.volumes[0]).includes(humanBytes(98_774_085)), p.detail(p.volumes[0]));
+    check('the footer totals the downloaded manga bytes',
+        p.footer()[1].includes(humanBytes(98_774_085)), p.footer()[1]);
+    checkEqual('no artifact line before the bridge reports sizes', p.footer().length, 2);
+    checkEqual('the row budget is unchanged without artifacts', p.rowBudget(), 26);
+
+    p.artifact('v', 'webp', 225_060);
+    p.artifact('v', 'cbz', 96_253_610);
+    p.artifact('v', 'mokuro', 353_545);
+    p.artifact('v', 'series', 2_048);
+
+    const lines = p.footer();
+    checkEqual('artifact sizes add a footer line', lines.length, 3);
+    for (const label of ['.webp cover', '.cbz archive', '.mokuro OCR', 'series.json']) {
+        check(`the artifact line lists ${label}`, lines[2].includes(label), lines[2]);
+    }
+    checkEqual('the extras total excludes the archive',
+        p.totals().extras, 225_060 + 353_545 + 2_048);
+    checkEqual('the footer reserves a row for the artifact line', p.rowBudget(), 25);
+
+    p.artifact('v', 'webp', 225_060);
+    checkEqual('a repeated artifact size is not added twice', p.totals().artifacts.webp, 225_060);
+    p.add('w', { tag: 'BW', label: 'volume w' });
+    p.volumes[1].bytes = 100;
+    p.artifact('w', 'webp', 50);
+    checkEqual('manga sizes accumulate across volumes', p.totals().bytes, 98_774_085 + 100);
+    checkEqual('artifact sizes accumulate across volumes', p.totals().artifacts.webp, 225_060 + 50);
+    // Every volume in a series reports the same series.json; it is one file, not one
+    // per volume, so the footer must not multiply it by the volume count.
+    p.artifact('w', 'series', 2_048);
+    checkEqual('a shared series.json is counted once', p.totals().artifacts.series, 2_048);
 }
 
 finish();

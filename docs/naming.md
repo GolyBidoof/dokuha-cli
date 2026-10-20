@@ -1,6 +1,6 @@
 # Naming
 
-How `dokuha` turns a volume into paths and file names on disk, and what it sends to mokuro-bridge. The rules live in `src/download/volume-folder.js` and `src/download/page-files.js`, and every store goes through them, so a mixed-store library has one shape.
+How `dokuha` turns a volume into paths and file names on disk, and what it sends if you opt into the optional mokuro-bridge hand-off. The rules live in `src/download/volume-folder.js` and `src/download/page-files.js`, and every store goes through them, so a mixed-store library has one shape.
 
 ## Volume folders
 
@@ -22,7 +22,7 @@ A sampler gets the suffix `（試し読み）` on both naming paths, title or id
 
 Each successful volume writes `metadata.json` into its folder. It records the store, the content id, the title and the expected page count. Kindle adds the series ASIN, the revision, the page count and a `sample` flag. When a folder already has a marker naming a different content id, the new volume is written to `title (id)` instead, so two volumes whose titles clean up identically are kept apart rather than merged. A folder with no marker is treated as the current volume's own, which is what lets an interrupted download resume in place.
 
-ebookjapan additionally writes `manifest.json`, which lists the pages and the descrambling state. It is written only after the whole volume succeeds and is what a resumed run reads to decide whether existing pages are reusable. mokuro-bridge completion is recorded separately, in `.dokuha-bridge-completion.json`, which names the destination it was written for and records a size and mtime signature of the page set.
+ebookjapan additionally writes `manifest.json`, which lists the pages and the descrambling state. It is written only after the whole volume succeeds and is what a resumed run reads to decide whether existing pages are reusable. Bridge completion, if you use the optional hand-off, is recorded separately in `.dokuha-bridge-completion.json`, which names the destination it was written for and records a size and mtime signature of the page set.
 
 ## Page names
 
@@ -30,7 +30,7 @@ The default page name is `page-0001.jpg` on every store: the word `page`, a hyph
 
 | Store | Extension | Notes |
 |---|---|---|
-| CMOA | `.jpg`, or `.png` with `--format` | `page-0001.jpg`; the vendored codec decides the final extension per page |
+| CMOA | `.jpg`, or `.png` with `--format png` | `page-0001.jpg`; the vendored codec decides the final extension per page |
 | ebookjapan | `.jpg`, or `.webp` | `.jpg` when descrambled to JPEG; `.webp` with `--format webp`, and `.webp` when descrambling is off |
 | Kindle | `.jpg` | Pages arrive assembled from the store |
 | k-manga | `.jpg` | Block-scrambled pages are rebuilt to JPEG |
@@ -38,11 +38,11 @@ The default page name is `page-0001.jpg` on every store: the word `page`, a hyph
 
 Older names are adopted on resume rather than re-downloaded: `page_0001.jpg`, a bare `0001.jpg`, and the pre-convention variations are renamed to the canonical name when found.
 
-Page modification times are rewritten one second apart in reading order, ending at roughly the time of the run. A reader that sorts by date then shows the pages in order even without an archive file.
+Page modification times are rewritten one second apart in reading order, ending at roughly the time of the run. A reader that sorts by date then shows the pages in order even without an archive file. A half-written page is never trusted: every reuse path validates the image itself, not just its name and size.
 
 ## BookWalker page names
 
-BookWalker's published manifest names each page after the EPUB source it was built from, so `dokuha` keeps that stem instead of an opaque ordinal. A page built from `OEBPS/text/cover.xhtml` is written as `0001 cover.jpg`, and the same name is used for the file on disk, the entry in a `--zip` archive, and the filename uploaded to mokuro-bridge, so a resume looks for the page it actually wrote.
+BookWalker's published manifest names each page after the EPUB source it was built from, so `dokuha` keeps that stem instead of an opaque ordinal. A page built from `OEBPS/text/cover.xhtml` is written as `0001 cover.jpg`, and the same name is used for the file on disk, the entry in a `--zip` archive, and the filename uploaded if the optional bridge hand-off is used, so a resume looks for the page it actually wrote.
 
 The rule is `bookWalkerPageName(index, source, extension)`:
 
@@ -54,6 +54,6 @@ The rule is `bookWalkerPageName(index, source, extension)`:
 
 The policy lives on the `dokuha` side, in `src/download/page-files.js`, and reaches the vendored engine as an optional `options.pageName(index, source, extension)` hook. With no hook the engine keeps its historical `page-NNNN.jpg` name.
 
-## What mokuro-bridge receives
+## What the optional bridge receives
 
 Bridge uploads always use `page_NNNN.ext`: the word `page`, an underscore, a one-based ordinal padded to four digits, and the lowercase extension. It is deliberately close to, but not the same as, the on-disk name, because the bridge sorts pages itself. The bridge path sorts by the ordinal encoded in each file's name rather than by the whole string, so a folder holding both `0001 cover.jpg` and a leftover `page-0002.jpg` still interleaves in reading order.

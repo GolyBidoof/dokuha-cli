@@ -21,7 +21,7 @@ import { createBookwalkerCarrier, prewarmBookwalker } from './download/bookwalke
 import { platform as bookwalkerPlatform } from './download/bookwalker.js';
 import { platform as kindlePlatform } from './download/kindle.js';
 import { existingVolume } from './download/existing-volume.js';
-import { connectBridge, finalizeWithProgress, pageFiles, pushToBridge, resumeExistingSession } from './bridge.js';
+import { bridgeSessionState, connectBridge, finalizeWithProgress, normalizeUploads, pageFiles, pushToBridge, resumeExistingSession } from './bridge.js';
 import { createPool } from './serial.js';
 import { BridgeClient, discoverBridge, resolveDestination, describeDestinations } from '../vendor/ebookjapan/bridge.mjs';
 
@@ -263,6 +263,9 @@ async function bridgeStage(record, ctx) {
                 progress: ctx.progress,
                 overwrite: ctx.config.overwrite,
                 ocrWaitMs: ctx.config.ocrWaitSeconds * 1000,
+                // Pass the run's shared map through this fresh options object, or the
+                // grouped resume notice lands on the object and is never printed.
+                bridgeResume: ctx.bridgeResume,
             });
         } catch (error) {
             record.mokuro = { error: error.message, resumedExisting: true };
@@ -288,6 +291,11 @@ async function bridgeStage(record, ctx) {
             Object.assign(record.mokuro, {
                 deferredFinalize: false,
                 outputDir: final?.output_dir || final?.outputDir || null,
+                outputFiles: normalizeUploads(final?.uploads),
+                status: final?.status || null,
+                message: final?.message || '',
+                partial: final?.status === 'partial_upload',
+                completed: final?.status === 'success',
             });
         } catch (error) {
             record.mokuro = { ...record.mokuro, deferredFinalize: false, error: error.message };
@@ -380,13 +388,27 @@ export async function run(positionals, config, io = {}) {
 
     let progress = null;
     if (!config.dryRun && !config.quiet && !config.json) {
-        progress = new LiveProgress({ quiet: config.quiet, plain: config.noProgress, stream: err });
+        // A plain download has no OCR or upload after it, so the block must measure
+        // the run by its pages rather than by the mokuro stage weights. --mokuro is
+        // known here; a bridge discovered for resume-only mode is handled below.
+        progress = new LiveProgress({
+            quiet: config.quiet,
+            plain: config.noProgress,
+            stream: err,
+            pipelineExpected: Boolean(config.mokuro),
+        });
         progress.startTicker();
     }
 
+    // A repeated URL, or a series URL plus one of its own volume URLs, would otherwise
+    // dispatch the same volume twice into one folder: the two downloads race on the
+    // same page files and completion marker, and the summary counts it twice.
+    const seenTaskKeys = new Set();
     const addTask = (task) => {
 
         if (!task.key) task.key = `${task.kind}:${task.target}`;
+        if (seenTaskKeys.has(task.key)) return;
+        seenTaskKeys.add(task.key);
         const index = tasks.length;
         tasks.push(task);
         (laneOf(task) === 'cpu' ? cpuLane : netLane).push(index);
@@ -437,14 +459,19 @@ export async function run(positionals, config, io = {}) {
         bwCarrier,
         kindleSession,
     })
-        .then((built) => { rejected = built.rejected; })
+        .then((built) => {
+            rejected = built.rejected;
+            // Printed here, not after the await below: with the default streaming mode
+            // the build promise settles after the scheduler has started, so the loop
+            // after `await` ran while `rejected` was still empty and a skipped input
+            // never said why. `say` still routes through the progress block when it exists.
+            for (const r of rejected) say(`  skipped ${r.input}: ${r.error}`);
+        })
         .catch((error) => { buildError = error; })
         .finally(() => { buildDone = true; notify(); });
 
     if (!streaming) await build;
     if (buildError) throw buildError;
-
-    for (const r of rejected) say(`  skipped ${r.input}: ${r.error}`);
 
     if (config.dryRun) {
 
@@ -504,34 +531,27 @@ export async function run(positionals, config, io = {}) {
                             worker: queue?.worker?.state || 'unknown',
                             processing: Number(queue?.processing_depth) || 0,
                             pending: Number(queue?.queue_depth) || 0,
-                            activeUploads: (sessions?.sessions || []).filter((session) => session.upload).length,
+                            // `upload` is per-session state, not activity: the bridge
+                            // leaves an `upload` object behind after the early cover
+                            // push with `active: false`. Counting the object painted a
+                            // busy footer through the whole OCR phase.
+                            activeUploads: (sessions?.sessions || [])
+                                .filter((session) => session.upload?.active).length,
                         });
-                        const byId = new Map((queue?.per_session || []).map((entry) => [entry.session_id, entry]));
                         for (const session of sessions?.sessions || []) {
                             const volume = progress.volumes.find((item) =>
                                 String(item.label).normalize('NFKC').trim().toLocaleLowerCase()
                                     === String(session.title).normalize('NFKC').trim().toLocaleLowerCase());
                             if (!volume || volume.phase === 'done' || volume.phase === 'error') continue;
-                            const counts = byId.get(session.session_id);
-                            const processingCount = Number(counts?.processing) || 0;
+                            const counts = (queue?.per_session || [])
+                                .find((entry) => entry.session_id === session.session_id);
                             const pendingCount = Number(session.pages_ocr_pending) || 0;
-                            const state = session.source_ingesting
-                                ? 'bridge ingesting'
-                                : session.upload
-                                    ? 'bridge uploading'
-                                    : processingCount
-                                        ? `bridge OCR processing ${processingCount}, ${pendingCount} pending`
-                                        : pendingCount
-                                            ? `bridge OCR queued ${pendingCount}`
-                                            : Number(session.pages_ocr_done) > 0
-                                                ? `bridge OCR complete (${session.pages_ocr_done}); session active`
-                                                : 'bridge session active; no OCR queued';
                             progress.update(volume.key, {
-                                bridgeState: state,
+                                bridgeState: bridgeSessionState(session, queue),
                                 bridgeOcrDone: Number(session.pages_ocr_done) || 0,
                                 bridgeOcrTotal: Number(session.pages_received) || 0,
                                 bridgeOcrPending: pendingCount,
-                                bridgeOcrProcessing: processingCount,
+                                bridgeOcrProcessing: Number(counts?.processing) || 0,
                             });
                         }
                     } catch { /* bridge status is observational; keep the run alive */ }
@@ -543,7 +563,7 @@ export async function run(positionals, config, io = {}) {
             }
         } catch (error) {
             err.write(`${error.message}\n`);
-            progress?.stop?.();
+            progress?.stopTicker();
             return { code: 1, summary: null };
         }
     } else if (!config.dryRun) {
@@ -557,6 +577,10 @@ export async function run(positionals, config, io = {}) {
                 const listed = await client.sessions();
                 if (Number(listed?.count) > 0) {
                     resumeBridge = { client, baseUrl: found.baseUrl, health: found.health };
+                    // Do not switch the footer weights here: a resumed session only
+                    // matters if one of this run's titles matches it, and most do not.
+                    // The first real bridge phase on a row flips the weights instead
+                    // (LiveProgress.pipelineUnderway).
                     say(`bridge ${found.baseUrl} (checking existing sessions only; no new OCR submissions)`);
                 }
             }
@@ -569,11 +593,19 @@ export async function run(positionals, config, io = {}) {
         progress,
         bridge,
         resumeBridge,
+        // Shared for the same scope reason as the Kindle sets below: `noteResume` fills
+        // this from the per-volume child context, so a lazily created Map lived only on
+        // that child and the grouped "already had a bridge session" line never printed.
+        bridgeResume: new Map(),
         // Created here, not lazily in the Kindle adapter, because `downloadTask` hands
         // each volume an `Object.create(ctx)`. An adapter that assigned this itself
         // would write it onto the per-volume child, and the run's own copy would stay
         // undefined, which is why the grouped return warning never printed.
         kindleUnreturned: new Set(),
+        // Same trap as above: the adapter creates this on the per-volume scope, so the
+        // run's teardown never saw the background returns and could print the grouped
+        // "loan could not be returned" line before they settled, or not at all.
+        kindleReturnWork: new Set(),
         // With OCR and upload still to run, a return waits in the background instead of
         // holding the volume. On a plain download there is nothing to overlap with, so
         // it stays in the foreground where its result is known before the volume ends.
@@ -637,6 +669,18 @@ export async function run(positionals, config, io = {}) {
     const results = [];
 
     const finish = (index, task, record) => {
+        // `partial_upload` is a terminal bridge result where the volume files arrived
+        // but the series index did not. The bridge keeps the working files and treats
+        // it as a failure; a folder without series.json is a series the reader cannot
+        // build, so the volume must not be reported as a success. Every bridge path
+        // (pages, folder ingest, resumed session, deferred finalize) ends here.
+        if (record?.ok && record.mokuro?.partial) {
+            record.ok = false;
+            record.error = 'the destination has the volume files but not series.json, so the '
+                + 'series index is incomplete'
+                + (record.mokuro.message ? ` (${record.mokuro.message})` : '')
+                + '; re-run with --force to replace the stored copies, or fix the destination error it reports';
+        }
         results[index] = record;
         progress?.finish(task.key, {
             error: record.ok

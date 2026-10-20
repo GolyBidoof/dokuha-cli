@@ -3,7 +3,7 @@
  *
  * A single socket is paced by the store, so a long volume spreads its pages over
  * several. What is under test is not the throughput (that is measured live in
- * `scripts/probes/probe-kmanga.mjs`) but the bookkeeping the pool introduces: every
+ * `tools/probes/probe-kmanga.mjs`) but the bookkeeping the pool introduces: every
  * page still lands on disk exactly once, each socket is asked only for its own
  * share, the decrypt key is taken from the first socket's header reply, a socket
  * that dies only costs its own shard, and a short volume opens one socket rather

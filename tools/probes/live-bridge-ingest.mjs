@@ -1,6 +1,6 @@
 // Live validation of the folder-ingest + stream-driven finalize path.
 //
-//   node scripts/probes/live-bridge-ingest.mjs [folder]
+//   node tools/probes/live-bridge-ingest.mjs [folder]
 //
 // Points at the running mokuro-bridge, hands it an already-downloaded volume
 // folder, and finalizes to a temporary local directory. Nothing is uploaded to a

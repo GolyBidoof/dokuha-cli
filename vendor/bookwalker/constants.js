@@ -13,13 +13,18 @@ const DEFAULT_PROFILE_DIR = process.env.BWDD_CLI_PROFILE ||
 // This CLI drives the userscript, which lives in the sibling repo rather than
 // here. `BWDD_US` (or --script) overrides it; the default assumes the two
 // projects are checked out side by side.
-// The repo was renamed at v2.0.0, so try the new directory name first and fall
-// back to the old one: a checkout that predates the rename still works.
-const SIBLING_REPO_DIRS = ['bookwalker-ebookjapan-cmoa-native-downloader', 'bookwalker-native-downloader'];
-const SIBLING_REPO_SCRIPT = SIBLING_REPO_DIRS
-    .map(d => path.resolve(__dirname, '..', '..', d, 'omnimanga-native-downloader.user.js'))
+// The repo and its combined artifact were both renamed at v3.0.0, so try the
+// current names first and fall back to the two earlier ones: a checkout that
+// predates the rename still works either way.
+const SIBLING_REPOS = [
+    ['dokuha-userscript', 'dokuha-userscript.user.js'],
+    ['bookwalker-ebookjapan-cmoa-native-downloader', 'omnimanga-native-downloader.user.js'],
+    ['bookwalker-native-downloader', 'omnimanga-native-downloader.user.js'],
+];
+const SIBLING_REPO_SCRIPT = SIBLING_REPOS
+    .map(([dir, file]) => path.resolve(__dirname, '..', '..', '..', dir, file))
     .find(p => fs.existsSync(p)) ||
-    path.resolve(__dirname, '..', '..', SIBLING_REPO_DIRS[0], 'omnimanga-native-downloader.user.js');
+    path.resolve(__dirname, '..', '..', '..', ...SIBLING_REPOS[0]);
 const DEFAULT_SCRIPT_PATH = process.env.BWDD_US || SIBLING_REPO_SCRIPT;
 const DEFAULT_OUTPUT_DIR = process.env.BWDD_CLI_OUTPUT ||
     path.resolve(__dirname, '..', 'output');

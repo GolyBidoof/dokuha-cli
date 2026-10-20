@@ -1,6 +1,6 @@
 // Live Kindle walk probe.
 //
-//   node scripts/probes/probe-kindle.mjs <ASIN> [--depth N] [--batch N] [--bundle]
+//   node tools/probes/probe-kindle.mjs <ASIN> [--depth N] [--batch N] [--bundle]
 //
 // Reimplements `walkKindleWindows` with a tunable prefetch depth so the effect of
 // pipelining can be measured instead of assumed. Read-only: it fetches render

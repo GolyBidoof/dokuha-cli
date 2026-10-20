@@ -42,7 +42,7 @@ function weightOf(entry) {
  * descrambling is `sharp`, and libvips already threads internally; capping the
  * callers was measured at 37.0 s against 28.5 s over three runs each, a 30 % loss,
  * because an outer queue only adds latency to work that was already saturating the
- * machine. See docs/phase-timing.md for the numbers.
+ * machine. See docs/architecture.md#the-cpu-budget for the numbers.
  *
  * A store with a `cpuWeight` but no `cpuSlot` still counts towards the
  * denominator if the caller names it in `active`, because naming it would shrink

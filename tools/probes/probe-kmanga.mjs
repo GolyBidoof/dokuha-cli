@@ -1,6 +1,6 @@
 // Live k-manga transport probe.
 //
-//   node scripts/probes/probe-kmanga.mjs [--sockets N] [--depth D] [--vol N] [--no-header]
+//   node tools/probes/probe-kmanga.mjs [--sockets N] [--depth D] [--vol N] [--no-header]
 //
 // Measures the viewer-socket transport of one free volume, with the page bytes
 // counted but not written and not descrambled, so what is timed is the store's own

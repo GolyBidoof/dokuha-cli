@@ -9,7 +9,7 @@
 | BookWalker | `bookwalker.jp` | Only for paid or library titles | Yes, anonymous | Yes | Yes, series and volume listing | net | For every volume (seam-carving) |
 | CMOA | `cmoa.jp` | No, free and preview only | Yes, anonymous | Yes | Yes, title listing by probing | cpu | No, a pure-JavaScript codec is vendored |
 | ebookjapan | `ebookjapan.yahoo.co.jp` | No, free and preview only | Yes, anonymous | Yes | Yes, title listing | net | Yes, to descramble; without it pages are written scrambled |
-| Kindle | `amazon.co.jp` | Always, including samplers | No anonymous route | With `--download-samplers` | Yes, walked forward one volume at a time | net | No, pages arrive assembled |
+| Kindle | `amazon.co.jp` | Always, including samplers | No anonymous route; account only | With `--download-samplers` | Yes, one series-list request plus a concurrent access probe per volume | net | No, pages arrive assembled |
 | k-manga | `comic.k-manga.jp` | No account support | Yes, anonymous | Yes | Yes, title listing | net | Yes, to descramble; without it pages are written scrambled |
 
 "Free in full" means a volume the store currently offers to read without paying. It is not the same as a preview, which is what `--download-samplers` handles.
@@ -23,7 +23,7 @@ A URL is claimed by the store that owns its host before any pattern is tried, so
 | BookWalker | `bookwalker.jp/series/<id>`, a volume URL carrying a `de<uuid>`, or a bare UUID. `?sample=` selects the trial route. |
 | CMOA | `cmoa.jp/title/<id>/vol/<n>`, `cmoa.jp/title/<id>`, a `speedreader` URL with `?cid=`, or a bare cid of the form `0000249001_jp_0001`. |
 | ebookjapan | `ebookjapan.yahoo.co.jp/books/<title>/<publication>`, `.../books/<title>`, a viewer or title URL, or a bare reading code such as `B000000002`. |
-| Kindle | `read.amazon.co.jp/manga/<asin>`, a product page such as `amazon.co.jp/dp/<asin>`, or a bare ASIN. |
+| Kindle | `read.amazon.co.jp/manga/<asin>`, a product page such as `amazon.co.jp/dp/<asin>`, or a bare ASIN (a `B0` followed by eight characters). |
 | k-manga | `comic.k-manga.jp/title/<id>/vol/<n>`, a `viewer-launcher` link, or `comic.k-manga.jp/title/<id>`. |
 
 A bare ebookjapan publication code (an `A` followed by digits) is refused with a message naming the `/books/<title>/<code>/` URL that does work, because a publication does not name its own title. A bare ten-character `B0...` token is genuinely ambiguous between a Kindle ASIN and an ebookjapan reading code; the registry tries Kindle first, and `tests/test_detect.mjs` pins that choice.
@@ -48,7 +48,7 @@ Cookie forms and the state files are covered in [auth.md](auth.md).
 | BookWalker | Series id in the URL, or the volume listing. Deduplicates volumes. | Yes |
 | CMOA | The title page, paging through the listing. CMOA publishes no volume list, so `--cm-volume all` probes volumes up to `--cm-scan-limit`. | Yes |
 | ebookjapan | The title page. | Yes |
-| Kindle | Walks forward from the volume you paste, one request per volume, up to 200 volumes. A volume that is free in full, already in your library, or borrowable through Kindle Unlimited is taken. | Yes, with `--download-samplers` |
+| Kindle | Reads the whole volume list in one `seriesAsinList` request made from the nearest volume that has a store page, then checks access for every volume at once; up to 200 volumes. A volume that is free in full, already in your library, or borrowable through Kindle Unlimited is taken. A Kindle-Unlimited-only volume with no store page is found through a related volume. | Yes, with `--download-samplers` |
 | k-manga | The title page. | Yes |
 
 There is no separate series folder. A series download writes one sibling volume folder per volume under `--out`, the same layout as a single-volume run. See [naming.md](naming.md).
@@ -59,10 +59,10 @@ A Kindle Unlimited volume is borrowed rather than owned. The CLI borrows it, dow
 
 ## Known limits
 
-- **Kindle has no anonymous route.** It speaks only to `amazon.co.jp`, walks a series forward from the volume you paste, and makes one request per volume while scanning, which makes it the slowest discovery.
+- **Kindle has no anonymous route.** It speaks only to `amazon.co.jp` and reads the volume list in one series-list request, but it still needs an access probe per volume to classify it, which makes it the slowest discovery.
 - **CMOA has no paid path.** Only volumes the store serves for free are reachable, because there is no cookie or session mechanism for the store here.
-- **ebookjapan is CPU-bound.** Its pages are tile-scrambled and rebuilt from the viewer's own WebAssembly, which is why it needs `sharp`. Its keep-alive socket pool is sized once at import from `--concurrency` (default 48), so `--eb-concurrency` alone changes the worker count but not the socket ceiling.
+- **ebookjapan is CPU-bound.** Its pages are tile-scrambled and rebuilt from the viewer's own WebAssembly, which is why it needs `sharp`. The vendored engine sizes its keep-alive socket pool at import from its own `--concurrency` default of 48, and dokuha runs each volume with 32 page workers by default. Dokuha's `--concurrency N` reaches both; `--eb-concurrency N` alone changes the page workers but not the socket ceiling.
 - **BookWalker needs `sharp` for every volume**, because the vendored engine normalises pages through it. It is the only store with two worker pools (the download and the normalise pool).
 - **k-manga's throughput cap belongs to the store.** It moves by more than five times over minutes and the client cannot raise it, so wall time is not predictable. `--km-concurrency` sets requests outstanding per viewer socket, 1 to 32; a long volume opens up to four sockets.
-- **Retries are a flat per-page budget, not adaptive backoff.** A failed volume does not stop the batch, and re-running the same command skips what is already on disk.
+- **Retries are a bounded per-page budget, not adaptive backoff across the run.** A failed volume does not stop the batch, and re-running the same command skips what is already on disk.
 - **Store changes will break a store.** These are undocumented viewer APIs. When a store changes its viewer, that adapter stops working until it is updated.
