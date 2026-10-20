@@ -2,13 +2,13 @@
 
 # 読破 (dokuha-cli) · v1.0.0
 
-<kbd>MIT</kbd> · <kbd>Node 20 or newer</kbd> · <kbd>five stores</kbd>
+<p align="center"><strong>Download manga volumes at the resolution the store serves, with no browser.</strong></p>
 
-**dokuha-cli downloads manga volumes at the resolution the store serves, with no browser.**
+<p align="center">MIT · Node.js 20 or newer</p>
 
-[Quick start](#quick-start) · [Install](#install) · [Screenshots](#screenshots) · [Why people use it](#why-people-use-it) · [How it works](#how-it-works) · [Optional companions](#optional-companions) · [Documentation](#documentation)
+[Quick start](#quick-start) · [Install](#install) · [Screenshots](#screenshots) · [Why people use it](#why-people-use-it) · [Supported stores](#supported-stores) · [How it works](#how-it-works) · [Related tools](#related-tools) · [Documentation](#documentation)
 
-dokuha-cli is a browserless Node CLI for five Japanese manga stores: BookWalker, CMOA, ebookjapan, Amazon Kindle (JP) and k-manga. Paste a volume URL and it captures the pages through the store's own viewer, rebuilds them offline into a folder of numbered images, and stops there. Paste a series URL with `--series` and it finds the volumes that are free to read in full, then downloads them.
+dokuha-cli is a browserless Node CLI for BookWalker, CMOA, ebookjapan, Amazon Kindle (JP) and k-manga. Paste a volume URL and it captures the pages through the store's own viewer, rebuilds them offline into a folder of numbered images, and stops there. Paste a series URL with `--series` and it finds the volumes that are free to read in full, then downloads them.
 
 The name comes from the Japanese word 読破, to read a work through to the end, which is what the tool is for: getting a whole run of books onto your own disk, at the size the store serves, without a browser in the loop.
 
@@ -26,11 +26,11 @@ dokuha --series 'https://www.cmoa.jp/title/214001/'
 dokuha --series --download-samplers 'https://ebookjapan.yahoo.co.jp/books/126001/'
 ```
 
-Free volumes and previews on four of the five stores need no account, no cookies and no login. Paid or library titles are opened with cookies you copy from your own browser, and Kindle always needs a session.
+Free volumes and previews on BookWalker, CMOA, ebookjapan and k-manga need no account, no cookies and no login. Paid or library titles are opened with cookies you copy from your own browser, and Kindle always needs a session.
 
 ## Install
 
-`dokuha-cli` needs Node 20 or newer. The global install is one command and the optional `sharp` dependency powers page rebuilding; npm installs it automatically.
+`dokuha-cli` needs Node 20 or newer. The global install is one command, and the optional `sharp` dependency powers page rebuilding; npm installs it automatically.
 
 ```sh
 npm install -g dokuha-cli
@@ -41,9 +41,9 @@ dokuha --help
 
 ## Screenshots
 
-<img width="880" alt="The dokuha live progress block during a mixed five-store run: one row per volume with its store code, stage such as OCR, done or finalize, a progress bar, page count and size, a footer totalling 468.7 MiB of manga over 1521 pages with 512 pages OCR done, 32 active and 1005 queued, and the output line with the webp, cbz, mokuro and series.json sizes." src="docs/images/progress-block.png" />
+<p align="center"><img width="880" alt="The dokuha live progress block during a mixed run across the stores: one row per volume with its store code, stage such as OCR, done or finalize, a progress bar, page count and size, a footer totalling 468.7 MiB of manga over 1521 pages with 512 pages OCR done, 32 active and 1005 queued, and the output line with the webp, cbz, mokuro and series.json sizes." src="docs/images/progress-block.png" /></p>
 
-The live progress block for a mixed five-store run: one row per volume, with download, OCR and upload stages in a single block, and the totals and output sizes along the bottom. Open the image to read the small text.
+<p align="center"><sub>The live progress block for a mixed run across the stores: one row per volume, with download, OCR and upload stages in a single block, and the totals and output sizes along the bottom. Open the image to read the small text.</sub></p>
 
 ## Why people use it
 
@@ -74,18 +74,18 @@ store URL ──► detect store ──► series walk ──► download lanes 
                                                    └─(optional)─► mokuro-bridge ──► reader library
 ```
 
-Detection is a registry lookup: each store owns its URL patterns and its adapter, so a mixed batch of URLs from all five stores can be one command.
+Detection is a registry lookup: each store owns its URL patterns and its adapter, so a mixed batch of URLs from every store can be one command.
 
 Downloading is a two-stage pipeline. A discovered volume first has its pages captured through the store's viewer, rebuilt offline and written to `--out` (default `./library`). Each volume gets its own folder, named after the title, holding `page-0001.jpg` and friends plus a `metadata.json` marker that records which volume owns the folder, so a sampler can never overwrite the book it belongs to. If the run was started with `--mokuro`, the finished folder then moves to a separate bridge stage with its own worker pool and queue, so a volume waiting on OCR never blocks the next download.
 
-The optional hand-off is an HTTP and NDJSON conversation with mokuro-bridge: the CLI opens an OCR session, delivers the pages (a local bridge reads the folder in one request; otherwise the pages are uploaded), then reads the finalize stream for progress until the destination reports a terminal result. The bridge owns that protocol and its documentation; this CLI is one client of it. `dokuha` never reads or writes the destination itself.
+The optional hand-off is an HTTP and NDJSON conversation with [mokuro-bridge](https://github.com/GolyBidoof/mokuro-bridge): the CLI opens an OCR session, delivers the pages (a local bridge reads the folder in one request; otherwise the pages are uploaded), then reads the finalize stream for progress until the destination reports a terminal result. OCR happens on the bridge side, where the batched [mokuro fork](https://github.com/GolyBidoof/mokuro) is the recommended engine and upstream mokuro is the slower fallback. The bridge owns that protocol and its documentation; this CLI is one client of it. `dokuha` never reads or writes the destination itself.
 
-## Optional companions
+## Related tools
 
 `dokuha-cli` is complete on its own. Two other tools can extend it, and neither is required.
 
-- **dokuha-userscript** is the sister tool in the dokuha family: the same idea, run in a browser instead of a terminal. It downloads the volume you already have open, which is convenient when you are already signed in there. Use it for one title, and the CLI for batches, series and automation.
-- **mokuro-bridge** is a separate, independent service from the mokuro ecosystem. It runs OCR, assembles `.cbz`, `.mokuro` and cover `.webp` files, and delivers them to a folder or a cloud account, publishing a per-series `series.json` that reader.mokuro.app reads. It also interoperates with mokuro-bunko. Adding `--mokuro` makes `dokuha` a client of that service; without it, nothing about OCR or mokuro-bridge is involved.
+- **[dokuha-userscript](https://github.com/GolyBidoof/dokuha-userscript)** is the sister tool in the dokuha family: the same idea, run in a browser instead of a terminal. It downloads the volume you already have open, which is convenient when you are already signed in there. Use it for one title, and the CLI for batches, series and automation.
+- **[mokuro-bridge](https://github.com/GolyBidoof/mokuro-bridge)** is a separate, independent service from the mokuro ecosystem. It runs OCR, assembles `.cbz`, `.mokuro` and cover `.webp` files, and delivers them to a folder or a cloud account, publishing a per-series `series.json` that [reader.mokuro.app](https://reader.mokuro.app) reads. It also interoperates with [mokuro-bunko](https://github.com/Gnathonic/mokuro-bunko). Adding `--mokuro` makes `dokuha` a client of that service; without it, nothing about OCR or mokuro-bridge is involved.
 
 ## Documentation
 
@@ -113,7 +113,7 @@ Thirty-one test files are discovered; thirty run offline and one is a live netwo
 
 ## Credits and licence
 
-Written by [GolyBidoof](https://github.com/GolyBidoof) and **DeepSeek V4.1 Flash**, which wrote the driver, the option parser, the store adapters, the progress display and the test suite.
+Built by [GolyBidoof](https://github.com/GolyBidoof) with **DeepSeek V4.1 Flash**, an AI coding agent. The agent implemented the driver, the option parser, the store adapters, the progress display and the test suite.
 
 "BookWalker", "CMOA", "ebookjapan", "Kindle" and "k-manga" are trademarks of their respective owners. This project is not affiliated with or endorsed by any of them.
 
