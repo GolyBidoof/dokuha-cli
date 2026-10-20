@@ -30,7 +30,7 @@ jobs:
         run: npm test
 
       - name: Test the vendored engines
-        run: npm run engines:test
+        run: npm run test:engine
 
       - name: The CLI starts and reports its version
         run: node bin/dokuha.mjs --version
