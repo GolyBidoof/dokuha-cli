@@ -55,7 +55,7 @@ Comments in this codebase tend to record the reason a thing is the way it is, us
 
 ## Tests
 
-Add a test for anything that could silently regress. The suite discovers 31 test files; 30 run offline and one, the live network check, is skipped unless `DOKUHA_TEST_NETWORK=1` is set. Two rules:
+Add a test for anything that could silently regress. The suite discovers 33 test files; 32 run offline and one, the live network check, is skipped unless `DOKUHA_TEST_NETWORK=1` is set. Two rules:
 
 1. **Default tests must be hermetic.** No network, no bridge, no real credentials. If a test needs a live store, put it in `tests/test_network.mjs`, which is skipped unless `DOKUHA_TEST_NETWORK=1` is set.
 2. **Never write to a real session or output directory.** Use `fs.mkdtempSync(path.join(os.tmpdir(), 'dokuha-'))` and clean it up, and pass `bwNoState: true` in any test context.

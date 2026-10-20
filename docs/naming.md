@@ -20,7 +20,7 @@ Two flags change the folder:
 
 A sampler gets the suffix `（試し読み）` on both naming paths, title or id. This matters because a sampler and its whole volume share a content id, so without the suffix they would land in the same directory and overwrite each other page for page.
 
-Each successful volume writes `metadata.json` into its folder. It records the store, the content id, the title and the expected page count. Kindle adds the series ASIN, the revision, the page count and a `sample` flag. When a folder already has a marker naming a different content id, the new volume is written to `title (id)` instead, so two volumes whose titles clean up identically are kept apart rather than merged. A folder with no marker is treated as the current volume's own, which is what lets an interrupted download resume in place.
+Each successful volume writes `metadata.json` into its folder. It records the store, the content id, the title and the expected page count. DMM also records `descrambled` and the descramble version, so a folder written with `--no-descramble` is not reused as a finished descrambled volume: when the marker's mode disagrees with the run, the pages are downloaded again rather than trusted. Kindle adds the series ASIN, the revision, the page count and a `sample` flag. When a folder already has a marker naming a different content id, the new volume is written to `title (id)` instead, so two volumes whose titles clean up identically are kept apart rather than merged. A folder with no marker is treated as the current volume's own, which is what lets an interrupted download resume in place.
 
 ebookjapan additionally writes `manifest.json`, which lists the pages and the descrambling state. It is written only after the whole volume succeeds and is what a resumed run reads to decide whether existing pages are reusable. Bridge completion, if you use the optional hand-off, is recorded separately in `.dokuha-bridge-completion.json`, which names the destination it was written for and records a size and mtime signature of the page set.
 
@@ -34,6 +34,7 @@ The default page name is `page-0001.jpg` on every store: the word `page`, a hyph
 | ebookjapan | `.jpg`, or `.webp` | `.jpg` when descrambled to JPEG; `.webp` with `--format webp`, and `.webp` when descrambling is off |
 | Kindle | `.jpg` | Pages arrive assembled from the store |
 | k-manga | `.jpg` | Block-scrambled pages are rebuilt to JPEG |
+| DMMブックス | `.jpg` | 64×64-tile-scrambled pages are rebuilt to JPEG (`--no-descramble` keeps the shuffle) |
 | BookWalker | `.jpg` | A different name shape, below |
 
 Older names are adopted on resume rather than re-downloaded: `page_0001.jpg`, a bare `0001.jpg`, and the pre-convention variations are renamed to the canonical name when found.

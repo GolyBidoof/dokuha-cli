@@ -135,7 +135,7 @@ try {
                 key: `${opt.name.replace(/-concurrency$/, '')}Concurrency`,
             }));
 
-        check('the per-store page counts are all declared', perStore.length === 5, `${perStore.length} found`);
+        check('the per-store page counts are all declared', perStore.length === 6, `${perStore.length} found`);
 
         for (const { flag, key } of perStore) {
             const flagName = flag.replace(/^--/, '');
@@ -148,12 +148,13 @@ try {
         // no store is handed another store's number.
         const stored = concurrencyContext({
             cmConcurrency: 11, ebConcurrency: 22, bwConcurrency: 33, kdlConcurrency: 44, kmConcurrency: 55,
+            dmmConcurrency: 66,
         }, PLATFORMS);
         checkEqual('every store concurrency reaches its adapter field',
-            [stored.cmoaConcurrency, stored.ebConcurrency, stored.bwConcurrency, stored.kdlConcurrency, stored.kmConcurrency],
-            [11, 22, 33, 44, 55]);
+            [stored.cmoaConcurrency, stored.ebConcurrency, stored.bwConcurrency, stored.kdlConcurrency, stored.kmConcurrency, stored.dmmConcurrency],
+            [11, 22, 33, 44, 55, 66]);
 
-        // --concurrency is the shared override for the five store page counts.
+        // --concurrency is the shared override for every store page count.
         for (const { key } of perStore) {
             checkEqual(`--concurrency sets ${key}`, parseOptions(['--concurrency', '7']).config[key], 7);
         }

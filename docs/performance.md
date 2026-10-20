@@ -46,12 +46,13 @@ A blank phase means the adapter has no seam there, not that the phase was free.
 | BookWalker | yes | yes | n/a | yes | n/a |
 | Kindle | yes | yes | yes | yes | yes |
 | k-manga | yes | yes | n/a | yes | yes |
+| DMMブックス | yes | yes | yes | yes | yes |
 
-`prework` is deliberately separate from `handshake`: it used to be folded in, which made Kindle's render-window walk look like a slow login. Which store exposes which seam follows from who owns the page loop. ebookjapan and Kindle run their own page loops and time each step where it happens. k-manga hands pages to a callback, so the socket read itself is not visible. CMOA and BookWalker delegate the whole loop to a vendored engine, so the adapter only sees the hooks the engine exposes. CMOA's `prework` is blank because its `openVolume` does the session and the page list in one call, and a guess would be worse than a blank.
+`prework` is deliberately separate from `handshake`: it used to be folded in, which made Kindle's render-window walk look like a slow login. Which store exposes which seam follows from who owns the page loop. ebookjapan, DMMブックス and Kindle run their own page loops and time each step where it happens. k-manga hands pages to a callback, so the socket read itself is not visible. CMOA and BookWalker delegate the whole loop to a vendored engine, so the adapter only sees the hooks the engine exposes. CMOA's `prework` is blank because its `openVolume` does the session and the page list in one call, and a guess would be worse than a blank.
 
-## Five stores, by phase
+## Five measured stores, by phase
 
-Two free volumes of the same title from each store, one process per store, measured 2026-10-01 with no OCR. 2,307 pages and 1,605 MiB.
+Two free volumes of the same title from each store, one process per store, measured 2026-10-01 with no OCR. 2,307 pages and 1,605 MiB. DMMブックス is not in this table: the measurements predate the sixth store, and no DMM phase breakdown has been taken yet.
 
 | Store | Pages | MiB | Wall | handshake | prework | page stage |
 |---|---|---|---|---|---|---|
@@ -74,7 +75,7 @@ At the work level, the page stage divides like this across concurrent workers:
 What the tables say:
 
 - **ebookjapan is the descrambling store.** Rebuild and write are most of its work and fetch is a sixth of it, yet its wall time is still one of the lowest because it runs many page workers at once.
-- **Kindle arrives assembled.** It is almost pure fetch; there is nothing to rebuild. Its `prework` is the render-window walk, which is why it is the largest `prework` of the five.
+- **Kindle arrives assembled.** It is almost pure fetch; there is nothing to rebuild. Its `prework` is the render-window walk, which is why it is the largest `prework` of the five measured stores.
 - **BookWalker is fetch and rebuild in equal measure**, with no measurable write because the vendored engine writes the pages itself.
 - **k-manga is the CDN.** Its page stage is 95 percent of the run, and the store's own throttling is the reason, not the client.
 - **CMOA has the flattest profile**, roughly 57/26/18, and no `prework` seam to show.
@@ -83,7 +84,7 @@ k-manga's row should be read as an upper bound. The same volumes measured 45.6 s
 
 ## Serial versus parallel downloads
 
-Whole free series, each store handed its series entry point so the tool discovered the volumes itself. Two arms per store: `--parallel 1` and the default unlimited. Measured 2026-10-13 on an Apple M4 Pro (14 cores, 24 GB), Node 26, dokuha 0.1.0, one store at a time, no OCR.
+Whole free series, each store handed its series entry point so the tool discovered the volumes itself. Two arms per store: `--parallel 1` and the default unlimited. Measured 2026-10-13 on an Apple M4 Pro (14 cores, 24 GB), Node 26, dokuha 0.1.0, one store at a time, no OCR; DMMブックス is not in this table for the same reason.
 
 | Store | Volumes | Pages | Size | Serial | Parallel |
 |---|---|---|---|---|---|
@@ -124,6 +125,12 @@ Past eight the remaining gain is under 20 percent while one extra speculative re
 Four sockets improve the median 2.4x and, more valuably, tighten the spread. The depth budget stays on each socket: 4 sockets x 16 requests measured 204 ms per page against 396 ms for 4 x 4. Eight sockets did not beat four (medians 10.01 s against 9.56 s over three interleaved pairs), so four stays the cap.
 
 **k-manga overlaps its chapter index with the socket handshake.** The index request measured 1027 to 1235 ms per volume and its result is only needed for the volume marker, so it runs underneath the handshake instead of in front of it.
+
+**DMMブックス starts at 16 page fetches in flight.** `--dmm-concurrency` defaults to 16 and caps at 32. Every page is a request against a short-lived signed CDN URL and the store answers bursts with 429s, so 16 is the working default rather than the ceiling; lower it if a run starts collecting 429s.
+
+## HTTP/2 page transport
+
+Node's global `fetch` is HTTP/1.1 only, while the DMM CDNs serve HTTP/2. `src/download/h2-fetch.js` multiplexes DMM page and manifest requests over one HTTP/2 session per CDN origin, falls back to the global `fetch` when an origin negotiates HTTP/1.1 or an h2 request fails, and keeps `Accept-Encoding: identity` because it does not decompress. The gain is latency, not bandwidth: on a link with about 300 ms round-trip time, eight concurrent HTTP/1.1 page requests reached about 68% of a 10.6 MB/s link and HTTP/2 reached about 99%, taking a 232-page volume from about 27.5 s to about 19 s. Below about 100 ms RTT the difference disappears, so this is a high-latency win rather than a general speedup.
 
 ## The optional bridge hand-off
 

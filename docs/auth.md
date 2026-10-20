@@ -4,13 +4,13 @@ Most volumes need nothing at all. This page is about the two stores that do, wha
 
 ## What needs no account
 
-CMOA, ebookjapan, BookWalker and k-manga all publish a free volume or a 試し読み preview for a title, and this CLI takes them anonymously:
+CMOA, ebookjapan, BookWalker, k-manga and DMMブックス all publish a free volume or a 試し読み preview for a title, and this CLI takes them anonymously:
 
 ```sh
 dokuha 'https://www.cmoa.jp/title/249001/' --series
 ```
 
-No cookies, no login, no flags. With `--download-samplers` the series walk carries on past the free volumes into each remaining volume's preview, which is written to its own `（試し読み）` folder so it can never overwrite the whole volume.
+No cookies, no login, no flags. With `--download-samplers` the series walk carries on past the free volumes into each remaining volume's preview, which is written to its own `（試し読み）` folder so it can never overwrite the whole volume. A DMMブックス 試し読み is a `tachiyomi/` viewer URL of its own: pasting that URL downloads the one preview directly, with no `--series` and no `--download-samplers`, and its folder carries a single `（試し読み）` suffix.
 
 **Kindle is the exception.** An Amazon manga volume is never public, not even a limited-time-free one, so there is no anonymous route at all. Every Kindle volume, sampler included, needs a signed-in `read.amazon.co.jp` session.
 

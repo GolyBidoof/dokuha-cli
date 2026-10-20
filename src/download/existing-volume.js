@@ -13,7 +13,7 @@ import { IMAGE_EXTENSIONS, isCompleteImageFile } from './page-files.js';
  */
 export async function existingVolume(ctx, {
     store, title, id, sample = false, expectedPages = 0, folder = null,
-    checkRemote = true, checkLocal = true,
+    checkRemote = true, checkLocal = true, markerCheck = null,
 } = {}) {
     if (!title || !id || ctx.config?.overwrite) return null;
 
@@ -45,6 +45,7 @@ export async function existingVolume(ctx, {
     const resolvedFolder = folder || await volumeFolder(ctx, { title, id, sample });
     const marker = await readVolumeMarker(resolvedFolder);
     if (!marker) return null;
+    if (typeof markerCheck === 'function' && !markerCheck(marker)) return null;
     const owner = marker.id ?? marker.publication ?? marker.code ?? null;
     if (owner == null || String(owner) !== String(id)) return null;
 

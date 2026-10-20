@@ -5,7 +5,7 @@
 ```bash
 npm run bump minor     # patch | minor | major | x.y.z; updates package.json and the README title
 # add the "## vX.Y.Z" section to CHANGELOG.md
-npm test               # the whole suite, 31 files (30 offline, one live check opt-in)
+npm test               # the whole suite, 33 files (32 offline, one live check opt-in)
 git add -A && git commit -m "Release vX.Y.Z"
 git tag vX.Y.Z
 git push origin main --tags

@@ -1,6 +1,6 @@
 <p align="center"><img src="docs/images/banner-dokuha.jpg" alt="The dokuha-cli banner: 読破 in orange brushstrokes inside a purple circle over a blurred shelf of manga covers, with DOKUHA (cli) underneath." width="720"></p>
 
-# 読破 (dokuha-cli) · v1.0.0
+# 読破 (dokuha-cli) · v1.1.0
 
 <p align="center"><strong>Download manga volumes at the resolution the store serves, with no browser.</strong></p>
 
@@ -8,7 +8,7 @@
 
 [Quick start](#quick-start) · [Install](#install) · [Screenshots](#screenshots) · [Why people use it](#why-people-use-it) · [Supported stores](#supported-stores) · [How it works](#how-it-works) · [Related tools](#related-tools) · [Documentation](#documentation)
 
-dokuha-cli is a browserless Node CLI for BookWalker, CMOA, ebookjapan, Amazon Kindle (JP) and k-manga. Paste a volume URL and it captures the pages through the store's own viewer, rebuilds them offline into a folder of numbered images, and stops there. Paste a series URL with `--series` and it finds the volumes that are free to read in full, then downloads them.
+dokuha-cli is a browserless Node CLI for BookWalker, CMOA, ebookjapan, Amazon Kindle (JP), k-manga and DMMブックス. Paste a volume URL and it captures the pages through the store's own viewer, rebuilds them offline into a folder of numbered images, and stops there. Paste a series URL with `--series` and it finds the volumes that are free to read in full, then downloads them.
 
 The name comes from the Japanese word 読破, to read a work through to the end, which is what the tool is for: getting a whole run of books onto your own disk, at the size the store serves, without a browser in the loop.
 
@@ -26,7 +26,7 @@ dokuha --series 'https://www.cmoa.jp/title/214001/'
 dokuha --series --download-samplers 'https://ebookjapan.yahoo.co.jp/books/126001/'
 ```
 
-Free volumes and previews on BookWalker, CMOA, ebookjapan and k-manga need no account, no cookies and no login. Paid or library titles are opened with cookies you copy from your own browser, and Kindle always needs a session.
+Free volumes and previews on BookWalker, CMOA, ebookjapan, k-manga and DMMブックス need no account, no cookies and no login. Paid or library titles are opened with cookies you copy from your own browser, and Kindle always needs a session. A DMMブックス 試し読み is a `tachiyomi/` viewer URL of its own: paste it and that one preview downloads without `--series` or `--download-samplers`.
 
 ## Install
 
@@ -48,7 +48,7 @@ dokuha --help
 ## Why people use it
 
 - **Browserless by design.** Every store has a private viewer API, and `dokuha` speaks to it directly. There is no Chrome, no Puppeteer and no DOM, so a run starts fast on a machine that has never had a browser installed and cannot be broken by a frontend redesign.
-- **Full resolution.** Pages are written at the size the store serves, not a viewer thumbnail. ebookjapan pages are rebuilt from the viewer's own shuffle geometry instead of screenshotted.
+- **Full resolution.** Pages are written at the size the store serves, not a viewer thumbnail. ebookjapan and DMMブックス pages are rebuilt from the viewer's own shuffle geometry instead of screenshotted.
 - **Series aware.** `--series` reads a title page or series page and takes the volumes that are free in full. `--download-samplers` adds each remaining 試し読み preview without ever letting it collide with the whole volume.
 - **Resumable.** Finished pages are checkpoints. Re-run the same command and only missing or invalid pages are fetched; `--force` starts over.
 - **Parallel where it pays.** Every discovered volume starts at once by default, and the CPU-heavy worker pools share one budget so no single volume takes the machine.
@@ -63,6 +63,9 @@ dokuha --help
 | ebookjapan | `ebookjapan.yahoo.co.jp` | Yes, anonymous | None | Yes |
 | Kindle | `amazon.co.jp` | No, every volume needs an account | Always | Yes, one request for the list |
 | k-manga | `comic.k-manga.jp` | Yes, anonymous | None | Yes |
+| DMMブックス | `book.dmm.com` | Yes, anonymous | None | Yes, `contents_book` listing |
+
+DMMブックス pages are a 64×64 tile shuffle: the optional `sharp` dependency rebuilds them, and without it a DMM run fails with the install line rather than writing shuffled pages. `--no-descramble` keeps the shuffle deliberately.
 
 [docs/stores.md](docs/stores.md) has the URL forms, the per-store limits and the Kindle Unlimited behaviour.
 
@@ -109,13 +112,13 @@ The optional hand-off is an HTTP and NDJSON conversation with [mokuro-bridge](ht
 npm test
 ```
 
-Thirty-one test files are discovered; thirty run offline and one is a live network check that is skipped unless `DOKUHA_TEST_NETWORK=1` is set. The offline suite is hermetic: no network, no credentials, no OCR model, and every title and identifier in the fixtures is invented. `npm run test:acceptance` runs the opt-in live comparison against a store and against the userscript checkout beside this one, and `npm run bench:phases` reproduces the phase table in [docs/performance.md](docs/performance.md).
+Thirty-three test files are discovered; thirty-two run offline and one is a live network check that is skipped unless `DOKUHA_TEST_NETWORK=1` is set. The offline suite is hermetic: no network, no credentials, no OCR model, and every title and identifier in the fixtures is invented. `npm run test:acceptance` runs the opt-in live comparison against a store and against the userscript checkout beside this one, and `npm run bench:phases` reproduces the phase table in [docs/performance.md](docs/performance.md).
 
 ## Credits and licence
 
 Built by [GolyBidoof](https://github.com/GolyBidoof) with **DeepSeek V4.1 Flash**, an AI coding agent. The agent implemented the driver, the option parser, the store adapters, the progress display and the test suite.
 
-"BookWalker", "CMOA", "ebookjapan", "Kindle" and "k-manga" are trademarks of their respective owners. This project is not affiliated with or endorsed by any of them.
+"BookWalker", "CMOA", "ebookjapan", "Kindle", "k-manga" and "DMMブックス" are trademarks of their respective owners. This project is not affiliated with or endorsed by any of them.
 
 For personal, lawful use: download only content you are entitled to access, such as purchased books, free samples and trial chapters. Respect the services' terms of service and the rights of authors and publishers. The maintainer assumes no liability for misuse.
 

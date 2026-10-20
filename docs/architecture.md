@@ -2,7 +2,7 @@
 
 This is the explanation a maintainer needs. For what the tool does and why you would want it, read the [README](../README.md). For measurement context behind the tuning, read [performance.md](performance.md).
 
-The whole design follows from one observation: the five stores have nothing in common except that each has a private viewer API. So the code is arranged so that everything the stores share is written once, and a store contributes only what is genuinely its own.
+The whole design follows from one observation: the six stores have nothing in common except that each has a private viewer API. So the code is arranged so that everything the stores share is written once, and a store contributes only what is genuinely its own.
 
 ## The shape of a run
 
@@ -68,7 +68,7 @@ series walk ──► tasks ──┬──► cpu lane ──┐
 ```
 
 - `--parallel N` governs the download stage through a single gate both lanes draw from. The default is unlimited: every discovered volume starts at once, and the CPU-bound part is admission-controlled per volume by `cpu-budget.js`.
-- CMOA runs on the CPU lane because its rebuilding is pure JavaScript. The other four run on the network lane.
+- CMOA runs on the CPU lane because its rebuilding is pure JavaScript. The other five run on the network lane.
 - With a finite `--parallel N`, an ordinary batch bounds the queue at twice that width, so a fast store cannot fill the disk while one OCR worker catches up. `--series` runs leave the queue unbounded so downloading can continue while earlier volumes wait.
 - `--bridge-parallel N` governs the bridge stage and defaults to the same width. Either option accepts `unlimited`.
 
@@ -97,6 +97,7 @@ How each store actually gets its pages:
 - **ebookjapan** asks the viewer's WebAssembly for its draw calls and replays them with sharp, because the shuffle table is not exposed. That is why it is CPU-bound where it used to be network-bound.
 - **Kindle** speaks the reader bundle's own API. A volume's pages arrive assembled, so there is nothing to rebuild; the cost is the render-window walk and the CDN. The walk pipelines its windows at depth 8, and the book's page-count ceiling is remembered across volumes in the run instead of being rediscovered.
 - **k-manga** is a WebSocket viewer that paces a connection rather than the requests on it. A long volume therefore opens up to four sockets, and each socket keeps its own request depth.
+- **DMMブックス** fetches a plain `configuration_pack.json` and then one JPEG per page. Each JPEG is a 64×64 tile shuffle keyed by the page path, so `sharp` rebuilds every page, and the shuffle is mandatory unless `--no-descramble` is passed. Page and manifest requests go over HTTP/2 through `src/download/h2-fetch.js`, which multiplexes them on one session per CDN origin, keeps `Accept-Encoding: identity` because it does not decompress, and falls back to the global fetch when the origin negotiates HTTP/1.1 or an h2 request fails. The free route signs with CloudFront cookies and the sampler route with `auth_info` query parameters; a 403 refreshes the auth once.
 
 ## The CPU budget
 
@@ -108,7 +109,7 @@ allocateCpu({ cores, active: { cmoa: 4, bookwalker: 1 }, renderJobs: null })
 
 The share is per volume on purpose: CMOA's render pool serves one volume, so four CMOA volumes must get a quarter each rather than four whole pools. A floor of one worker per volume keeps a very large batch useful, which also means the shares are admission control rather than a hard run-wide cap. Eighteen CMOA volumes on a thirteen-core machine get one render thread each, so the sum across volumes can exceed the core count. The point is that no single volume takes the machine; the total is not promised.
 
-Only CMOA and BookWalker declare a CPU slot, because their pools are ordinary JavaScript workers that respond to admission control. ebookjapan and k-manga descramble through `sharp`, and libvips already threads internally; an outer queue measured 30 percent slower, so their callers are left alone. The weights and slots come from each descriptor, so the allocator names no store.
+Only CMOA and BookWalker declare a CPU slot, because their pools are ordinary JavaScript workers that respond to admission control. ebookjapan, k-manga and DMMブックス descramble through `sharp`, and libvips already threads internally; an outer queue measured 30 percent slower, so their callers are left alone. The weights and slots come from each descriptor, so the allocator names no store.
 
 ## The series walker
 
@@ -121,6 +122,7 @@ Discovery is store-specific and bounded per store:
 - **ebookjapan** reads the title page's series data, keeping the free volumes and, when asked, the trial volumes.
 - **Kindle** reads the whole volume list in one `seriesAsinList` request from the nearest volume that has a store page, then classifies every volume's access concurrently, up to 200 volumes. A Kindle-Unlimited-only volume with no store page is reached through a related volume.
 - **k-manga** reads the title page's volume list.
+- **DMMブックス** reads the `contents_book` listing until the pager's `total_count` is reached and fails loudly if it sees fewer volumes than that, then keeps the free volumes and, with `--download-samplers`, the `tachiyomi` samplers.
 
 A series download writes one sibling volume folder per volume under `--out`, the same layout as a single-volume run. There is no separate series directory.
 
@@ -169,7 +171,7 @@ A volume that failed in the bridge stage is a failed volume, never a failed run:
 
 Each keeps its own retry loop, connection handling and timeouts. A shared HTTP layer is the tempting move and the wrong one: each store's polite-request behaviour is tuned to what that store tolerates, and the part they have in common is the easiest to get subtly wrong. [vendor/README.md](../vendor/README.md) records every deviation.
 
-Kindle and k-manga are not vendored engines. Their adapters and protocol code live in `src/download/` because they were written for this project.
+Kindle, k-manga and DMMブックス are not vendored engines. Their adapters and protocol code live in `src/download/` because they were written for this project.
 
 The ebookjapan viewer WebAssembly is not vendored. It is the store's proprietary build output, fetched at runtime into `~/.bwdd-cli/ebookjapan-assets/`, and redistributing it is not this project's to do.
 
@@ -190,7 +192,7 @@ The ebookjapan viewer WebAssembly is not vendored. It is the store's proprietary
 
 ## Testing
 
-`npm test` discovers 31 files: 30 run offline and one, the live network check, is skipped unless `DOKUHA_TEST_NETWORK=1` is set. There is no network, no credentials and no OCR model in the default suite.
+`npm test` discovers 33 files: 32 run offline and one, the live network check, is skipped unless `DOKUHA_TEST_NETWORK=1` is set. There is no network, no credentials and no OCR model in the default suite.
 
 Three things are worth knowing about how it is written:
 
@@ -211,3 +213,4 @@ The vendored trees record their own upstream in [vendor/README.md](../vendor/REA
 - **A failed volume does not stop a batch.** Re-running the same command skips what is already on disk.
 - **k-manga's throughput belongs to the store.** It moves by multiples over minutes and the client cannot raise it.
 - **Retries are a bounded per-page budget, not an adaptive backoff across the run.** A store that is down stays down for the length of that budget.
+- **DMMブックス has no paid path here.** It reaches the free full volumes and the 試し読み samplers, and its pages need `sharp` for the 64×64 shuffle.

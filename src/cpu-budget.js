@@ -1,7 +1,7 @@
 /**
  * One CPU budget, shared by every store that re-encodes pages.
  *
- * Four of the five stores do per-page CPU work: CMOA renders through a worker
+ * Five of the six stores do per-page CPU work: CMOA renders through a worker
  * pool, BookWalker seam-carves, ebookjapan and k-manga descramble. Each of them
  * used to size itself independently, which meant they did not size themselves
  * against each other: CMOA could take `cores` threads and BookWalker could take

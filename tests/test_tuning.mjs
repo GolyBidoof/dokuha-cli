@@ -55,14 +55,14 @@ const platforms = [...PLATFORMS, SYNTHETIC];
 // Every real store is still the one source of its own tuning
 // ---------------------------------------------------------------------------
 {
-    checkEqual('the registry is still the five stores',
-        PLATFORMS.map((entry) => entry.id), ['kindle', 'cmoa', 'ebookjapan', 'bookwalker', 'kmanga']);
+    checkEqual('the registry is still the six stores',
+        PLATFORMS.map((entry) => entry.id), ['kindle', 'cmoa', 'ebookjapan', 'bookwalker', 'kmanga', 'dmm']);
     check('every real store declares a tuning block',
         PLATFORMS.every((entry) => entry.tuning && Number(entry.tuning.cpuWeight) > 0),
         PLATFORMS.map((entry) => entry.id).join(', '));
     checkEqual('the real defaults are unchanged',
-        [DEFAULTS.cmConcurrency, DEFAULTS.ebConcurrency, DEFAULTS.bwConcurrency, DEFAULTS.kdlConcurrency, DEFAULTS.kmConcurrency],
-        [12, 32, 128, 12, 16]);
+        [DEFAULTS.cmConcurrency, DEFAULTS.ebConcurrency, DEFAULTS.bwConcurrency, DEFAULTS.kdlConcurrency, DEFAULTS.kmConcurrency, DEFAULTS.dmmConcurrency],
+        [12, 32, 128, 12, 16, 16]);
 }
 
 // ---------------------------------------------------------------------------
@@ -91,7 +91,7 @@ const platforms = [...PLATFORMS, SYNTHETIC];
         option?.help);
     checkEqual('the generated flags keep their order',
         storeConcurrencyOptions(platforms).map((entry) => entry.name),
-        ['cm-concurrency', 'eb-concurrency', 'bw-concurrency', 'kdl-concurrency', 'km-concurrency', 'synthetic-concurrency']);
+        ['cm-concurrency', 'eb-concurrency', 'bw-concurrency', 'kdl-concurrency', 'km-concurrency', 'dmm-concurrency', 'synthetic-concurrency']);
     checkEqual('the registry-derived defaults include the descriptor',
         concurrencyDefaults(platforms).syntheticConcurrency, 7);
 }
@@ -102,12 +102,12 @@ const platforms = [...PLATFORMS, SYNTHETIC];
 {
     const stored = concurrencyContext({
         cmConcurrency: 11, ebConcurrency: 22, bwConcurrency: 33, kdlConcurrency: 44, kmConcurrency: 55,
-        syntheticConcurrency: 66,
+        dmmConcurrency: 66, syntheticConcurrency: 77,
     }, platforms);
-    checkEqual('the descriptor contextKey is the field that is filled', stored.syntheticViewerConcurrency, 66);
+    checkEqual('the descriptor contextKey is the field that is filled', stored.syntheticViewerConcurrency, 77);
     checkEqual('the real stores keep their own context fields',
-        [stored.cmoaConcurrency, stored.ebConcurrency, stored.bwConcurrency, stored.kdlConcurrency, stored.kmConcurrency],
-        [11, 22, 33, 44, 55]);
+        [stored.cmoaConcurrency, stored.ebConcurrency, stored.bwConcurrency, stored.kdlConcurrency, stored.kmConcurrency, stored.dmmConcurrency],
+        [11, 22, 33, 44, 55, 66]);
     checkEqual('no value is invented for an unset store',
         concurrencyContext({}, platforms).syntheticViewerConcurrency, undefined);
 }

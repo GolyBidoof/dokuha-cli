@@ -17,8 +17,8 @@ Re-running the same command is the normal first response to a `1`: finished page
 Nothing in the positionals resolved to a store. The reasons are listed under the message. The usual causes:
 
 - A bare ebookjapan publication code (`A` followed by digits) is refused on purpose, because a publication does not name its own title. Use `https://ebookjapan.yahoo.co.jp/books/<title>/<code>/` instead.
-- A series or title page given without `--series`. The message says to add it. A CMOA title page without `--series` resolves to volume 1 by default, which is `--cm-volume`'s doing.
-- A URL from a store this tool does not speak to, or a URL whose host is one of the five but whose path is not one it can read.
+- A series or title page given without `--series`. The message says to add it. A CMOA title page without `--series` resolves to volume 1 by default, which is `--cm-volume`'s doing, and a DMM `/product/<series>/` or `/volumes/` page is refused until you add `--series`; a pasted DMM `free_streaming/` or `tachiyomi/` viewer URL is a single volume and needs no flag, and `/latest/` resolves the newest listed volume on its own.
+- A URL from a store this tool does not speak to, or a URL whose host is one of the six but whose path is not one it can read.
 
 ## A flag is rejected
 
@@ -52,6 +52,13 @@ Every Kindle volume needs a session, including a limited-time-free one. Pass `--
 - **"is a Kindle series page, not a volume"** means the ASIN you pasted is the series, not one of its volumes. Paste a volume URL (on `.../dp/<ASIN>`, the ASIN that is not the series) and add `--series` to download the whole series from it.
 - **A Kindle Unlimited title that will not borrow** is usually an expired session rather than an expired subscription.
 - Only `read.amazon.co.jp` and only the Japan store are spoken to.
+
+## DMMブックス: 403, 429 and shuffled pages
+
+- **A 403 on a page or on `configuration_pack.json`** means the CloudFront signature rolled over. The adapter refreshes `/viewerapi/auth/` once, one refresh shared by the manifest and every page worker, and retries the request; a 403 that survives that refresh is a real refusal, so reopen the viewer and paste a fresh URL. The CLI sends the free route's CloudFront values in the `Cookie` header.
+- **429s and 5xx** retry with bounded backoff. Lower `--dmm-concurrency` (default 16) to reduce pressure, and use `--parallel N` to start fewer volumes at once; `--retries` sets the per-page attempt budget, and a 403 refresh does not spend one of those attempts.
+- **A chessboard page is a deliberate `--no-descramble` output.** If the shuffle was not meant to stay, rerun without the flag. When `sharp` is missing the run fails with its install line instead of writing a shuffled page.
+- **A sampler is not a free volume.** `free_streaming_url` is present only while the free window is open, and the rest expose `tachiyomi_url`. A pasted `tachiyomi/` viewer URL downloads that one preview directly, with no `--series` and no `--download-samplers`; in a `--series` walk, add `--download-samplers` to take the previews, and each sampler folder gets one `（試し読み）` suffix.
 
 ## k-manga: launcher or entry-point failures
 

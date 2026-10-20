@@ -88,8 +88,8 @@ const BASE_OPTIONS = [
     { name: 'jpeg-quality', type: 'string', arg: 'N', group: 'CMOA', advanced: true, help: 'quality of the JPEG CMOA pages are re-encoded at, 1-100 (default 92); lower is faster to write and smaller' },
 
     { name: 'format', type: 'string', arg: 'FMT', group: 'Page format', advanced: true, help: 'page format: original or jpeg for CMOA, jpeg or webp for ebookjapan (default: the store\'s own for CMOA, jpeg for ebookjapan)' },
-    { name: 'descramble', type: 'boolean', group: 'Page format', advanced: true, help: 'require page descrambling (ebookjapan, k-manga); fails if the optional sharp dependency is missing' },
-    { name: 'no-descramble', type: 'boolean', group: 'Page format', advanced: true, help: 'keep the scrambled pages exactly as the CDN serves them (ebookjapan, k-manga)' },
+    { name: 'descramble', type: 'boolean', group: 'Page format', advanced: true, help: 'require page descrambling (ebookjapan, k-manga, DMM); fails if the optional sharp dependency is missing' },
+    { name: 'no-descramble', type: 'boolean', group: 'Page format', advanced: true, help: 'keep the scrambled pages exactly as the CDN serves them (ebookjapan, k-manga, DMM)' },
 
     { name: 'bw-cookie', type: 'string', arg: 'TEXT', multiple: true, group: 'BookWalker auth', help: 'Cookie header, "Copy as cURL" command, @FILE, a path, or "-" for stdin. Repeatable and merged' },
     { name: 'bw-state', type: 'string', arg: 'FILE', group: 'BookWalker auth', advanced: true, help: 'where the saved session lives' },

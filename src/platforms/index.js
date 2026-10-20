@@ -15,12 +15,13 @@ import { platform as cmoa } from '../download/cmoa.js';
 import { platform as ebookjapan } from '../download/ebookjapan.js';
 import { platform as kindle } from '../download/kindle.js';
 import { platform as kmanga } from '../download/kmanga.js';
+import { platform as dmm } from '../download/dmm.js';
 import { USER_AGENT } from '../user-agent.js';
 
 export { USER_AGENT };
 import { reject } from '../series.js';
 
-export const PLATFORMS = [kindle, cmoa, ebookjapan, bookwalker, kmanga];
+export const PLATFORMS = [kindle, cmoa, ebookjapan, bookwalker, kmanga, dmm];
 
 const BY_KIND = new Map();
 for (const entry of PLATFORMS) {
@@ -164,6 +165,7 @@ export function rowLabel(task) {
     if (task.kind === 'bookwalker') return task.cid || task.target;
     if (task.kind === 'kindle') return task.asin || task.target;
     if (task.kind === 'kmanga') return task.target;
+    if (task.kind === 'dmm') return task.target;
     return task.target.replace(/^https?:\/\/[^/]+/, '');
 }
 

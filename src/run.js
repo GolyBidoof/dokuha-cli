@@ -133,7 +133,11 @@ export async function buildTasks(positionals, config, { onRejected = () => {}, o
         // volumes says so with `expand`; the rest publish the one volume the input
         // named. `platform.resolve` is only ever called on the strength of that.
         if (platform.expand(det)) {
-            const resolved = await platform.resolve(det, config, input, { fetchImpl, userAgent: USER_AGENT });
+            const resolved = await platform.resolve(det, config, input, {
+                fetchImpl,
+                userAgent: USER_AGENT,
+                samplers: config.downloadSamplers === true,
+            });
             for (const note of resolved.notes || []) onNote(note);
             for (const task of resolved.tasks) publish(task);
             rejected.push(...resolved.rejected);
@@ -174,6 +178,7 @@ async function downloadTask(task, ctx) {
     scoped.timer = createPhaseTimer();
 
     try {
+        const markerPlatform = platformFor(task.kind);
         const alreadyPresent = await existingVolume(scoped, {
             store: task.kind,
             title: task.title,
@@ -181,6 +186,12 @@ async function downloadTask(task, ctx) {
             sample: task.sample === true,
             checkRemote: Boolean(ctx.bridge && task.title),
             checkLocal: !ctx.bridge,
+            // A store whose folder can hold either raw or rebuilt bytes states
+            // what "finished" means; without this a series task skips a folder
+            // the adapter itself would have refused.
+            markerCheck: typeof markerPlatform?.markerCheck === 'function'
+                ? (marker) => markerPlatform.markerCheck(marker, scoped)
+                : null,
         });
         if (alreadyPresent) {
             Object.assign(record, normalizeStoreResult({ ...alreadyPresent, store: task.kind }, task), {
@@ -430,8 +441,9 @@ export async function run(positionals, config, io = {}) {
         return { code: 2, summary: null };
     }
 
-    if (config.downloadSamplers && !config.series) {
-        say('note: --download-samplers only applies with --series; ignoring it');
+    if (config.downloadSamplers && !config.series
+        && !positionals.some((input) => /^https?:\/\/book\.dmm\.com\/product\//i.test(String(input).trim()))) {
+        say('note: --download-samplers only applies with --series or a DMM product URL; ignoring it');
     }
 
     if (config.zip && positionals.some((input) => {

@@ -6,9 +6,12 @@
  * throwaway harness: it runs `bin/dokuha.mjs --json` per store and prints what each
  * adapter attributed to `handshake`, `prework`, `fetch`, `rebuild` and `write`.
  *
- *   node tools/bench-phases.mjs                 # all five, one free volume each
+ *   node tools/bench-phases.mjs                 # every store with a URL set below
  *   node tools/bench-phases.mjs cmoa bookwalker # a subset
  *   node tools/bench-phases.mjs --no-descramble # keep the scrambled mosaic
+ *
+ * DMMブックス viewer URLs carry a short-lived `cid`, so its STORES entry is a
+ * placeholder to paste a live URL into before a DMM run.
  *
  * Read `docs/performance.md` before quoting a number from this: the phases do
  * not all mean the same thing, and two of them are aggregates rather than wall time.
@@ -29,6 +32,9 @@ const STORES = {
     bookwalker: 'https://bookwalker.jp/def5a49973-58a0-44b0-a6ce-41abdc306335/',
     kmanga: 'https://comic.k-manga.jp/title/167001/pv',
     kindle: 'https://www.amazon.co.jp/dp/B000000001/',
+    // DMM viewer URLs carry a short-lived cid; paste a live free-viewer URL here
+    // before a DMM run. The placeholder is skipped with a note otherwise.
+    dmm: 'https://book.dmm.com/product/000000/aaaaaaaaaaaa/free_streaming/?cid=REPLACE_WITH_FRESH_CID',
 };
 
 const argv = process.argv.slice(2);
@@ -64,8 +70,13 @@ function run(url) {
 
 const rows = [];
 for (const name of names) {
+    const url = STORES[name];
+    if (url.includes('REPLACE_WITH_FRESH_CID')) {
+        process.stderr.write(`${name}: paste a live free-viewer URL into STORES.dmm first\n`);
+        continue;
+    }
     process.stderr.write(`${name}: downloading one volume...\n`);
-    const { record, stderr } = await run(STORES[name]);
+    const { record, stderr } = await run(url);
     if (!record) {
         process.stderr.write(`${name}: no result (${stderr.trim().split('\n').pop() || 'no output'})\n`);
         continue;

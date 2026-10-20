@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.1.0
+
+**DMMブックス is the sixth store.** dokuha now downloads its free full volumes and 試し読み samplers through the same browserless viewer protocol as the other five stores, walks a DMM series from its product pages, and keeps the resume behaviour the rest of the CLI has. DMM pages arrive as a 64×64 tile shuffle, so `sharp` rebuilds them and `--no-descramble` is the explicit way to keep the shuffled bytes. Paid and library titles have no cookie path here, so this release covers the free volumes and the samplers.
+
+### Added
+
+- **DMMブックス: free volumes and 試し読み samplers.** A pasted `free_streaming/` viewer URL downloads a volume that is free in full for its limited window, and a pasted `tachiyomi/` URL downloads that one sampler directly, with no `--series` and no listing request. The adapter calls `/viewerapi/auth/` for the short-lived session, sends the free route's CloudFront values in the `Cookie` header and the sampler's `auth_info` as signed query parameters (decoded once so `URLSearchParams` cannot double-encode the signature), reads the plain `configuration_pack.json`, fetches every JPEG, and rebuilds each 64×64 tile shuffle with `sharp`. A 403 on a page or on the manifest refreshes the auth once and retries, and 429 and 5xx responses retry with the page's own budget.
+- **DMM series and sampler walks.** `--series` on a DMM product page, `/volumes/` listing or `/latest/` reads the `contents_book` BFF listing, keeps the volumes with a `free_streaming_url` and stops only when the pager's `total_count` is reached, failing loudly if it sees fewer volumes than the store says exist. `--download-samplers` adds each remaining volume's `tachiyomi` preview. A DMM series page pasted without `--series` is refused with a message rather than quietly taken as one volume.
+- **`--dmm-concurrency`** sets how many DMM page fetches are in flight, default 16 and maximum 32. It is a per-store flag beside the other stores' and `--concurrency` still overrides it.
+- **DMM page and manifest requests go over HTTP/2.** Node's global `fetch` speaks HTTP/1.1 only, and the DMM CDNs serve HTTP/2. The new `src/download/h2-fetch.js` multiplexes DMM page and manifest requests over one HTTP/2 session per CDN origin, falls back to the global `fetch` when an origin negotiates HTTP/1.1 or an h2 request fails, and keeps `Accept-Encoding: identity` because it does not decompress. The gain is latency rather than bandwidth: on a link with about 300 ms round-trip time, eight concurrent HTTP/1.1 page requests reached about 68% of a 10.6 MB/s link and HTTP/2 reached about 99%, taking a 232-page volume from about 27.5 s to about 19 s. Below about 100 ms RTT the difference disappears, so this is a high-latency win and not a general speedup.
+- **Resume keeps the descramble state honest.** A DMM folder marker records whether its pages were descrambled and which shuffle version rebuilt them. When a run's requested mode disagrees with the marker, the pages are downloaded again instead of being reused as if they were the requested kind; a completed folder with the matching mode still resumes without a page request.
+
+### Fixed
+
+- **A DMM sampler folder no longer gets two `（試し読み）` suffixes.** The display title and the folder helper both added the suffix, which produced a path such as `タイトル（試し読み）（試し読み）`; the folder helper now adds it once.
+- **A 403 on `configuration_pack.json` was a hard failure.** It is the same signature rollover as a page 403, so it now refreshes the auth once and reads the manifest again; the refresh is shared by the manifest and every page worker, so a rollover costs one `/viewerapi/auth/` call rather than one per page.
+- **DMM page attempts now follow `--retries`.** The adapter used a fixed three attempts, so `--retries` was ignored for this store. It now drives the per-page budget, and the single 403 refresh stays outside that budget because the retry runs against the replacement session.
+- **A short DMM series walk now fails instead of looking complete.** The listing is read until `pager.total_count` is reached; a walk that sees fewer volumes than the store reports is an error naming the count, rather than a series silently truncated to its first page.
+
+### Changed
+
+- **DMMブックス is the sixth store in the docs, the help text and the bench.** `--help`, the store matrix, the URL and session tables, the series walker, the naming rules, the phase notes in `docs/performance.md` and the `bench:phases` store list now name DMMブックス. `tools/bench-phases.mjs` carries a DMM entry whose viewer URL has to be pasted in first because the `cid` expires.
+- **The stores and troubleshooting pages were corrected where they described an earlier draft.** A missing `sharp` is documented as a hard error rather than a shuffled page (`--no-descramble` is the opt-in), the 403 refresh is documented for both a page and `configuration_pack.json`, `--dmm-concurrency` is separated from the `--parallel` volume count, and a pasted `tachiyomi/` URL is documented as a single sampler that needs no flags.
+- **The discovered suite is now 33 files, 32 of them offline.** `tests/test_dmm.mjs` pins 119 checks on its own: the URL routes, CloudFront signing, the manifest, the 64×64 geometry, descrambling, the sampler, the 403 refresh, `--retries`, the descramble marker and page order. `tests/test_h2_fetch.mjs` adds 70 checks for the HTTP/2 transport and its HTTP/1.1 fallback. The one live network check still needs `DOKUHA_TEST_NETWORK=1`.
+
 ## v1.0.0
 
 **The first stable release.** dokuha-cli is the browserless batch downloader of the dokuha project: five stores through their own viewer protocols, series downloads that find the free volumes themselves, a live progress block, and an optional hand-off to mokuro-bridge for OCR and delivery. This release collects everything since 0.1.1 and settles the interfaces that scripts can rely on: the `--json` summary, the CLI options, the exit codes and the bridge client contract.

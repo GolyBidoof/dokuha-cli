@@ -1,6 +1,6 @@
 # Stores
 
-`dokuha` supports five storefronts. Each is a platform descriptor in `src/platforms/index.js` with its own URL patterns, its own adapter in `src/download/`, and its own idea of what is free. This page is the support matrix, the session requirements and the known limits. It is verified against the code, not against the store's own documentation.
+`dokuha` supports six storefronts. Each is a platform descriptor in `src/platforms/index.js` with its own URL patterns, its own adapter in `src/download/`, and its own idea of what is free. This page is the support matrix, the session requirements and the known limits. It is verified against the code, not against the store's own documentation.
 
 ## At a glance
 
@@ -8,9 +8,10 @@
 |---|---|---|---|---|---|---|---|
 | BookWalker | `bookwalker.jp` | Only for paid or library titles | Yes, anonymous | Yes | Yes, series and volume listing | net | For every volume (seam-carving) |
 | CMOA | `cmoa.jp` | No, free and preview only | Yes, anonymous | Yes | Yes, title listing by probing | cpu | No, a pure-JavaScript codec is vendored |
-| ebookjapan | `ebookjapan.yahoo.co.jp` | No, free and preview only | Yes, anonymous | Yes | Yes, title listing | net | Yes, to descramble; without it pages are written scrambled |
+| ebookjapan | `ebookjapan.yahoo.co.jp` | No, free and preview only | Yes, anonymous | Yes | Yes, title listing | net | Yes, to descramble; without it the default run warns and writes the mosaic |
 | Kindle | `amazon.co.jp` | Always, including samplers | No anonymous route; account only | With `--download-samplers` | Yes, one series-list request plus a concurrent access probe per volume | net | No, pages arrive assembled |
-| k-manga | `comic.k-manga.jp` | No account support | Yes, anonymous | Yes | Yes, title listing | net | Yes, to descramble; without it pages are written scrambled |
+| k-manga | `comic.k-manga.jp` | No account support | Yes, anonymous | Yes | Yes, title listing | net | Yes, to descramble; a missing `sharp` fails the run unless `--no-descramble` |
+| DMMブックス | `book.dmm.com` | No account path here | Yes, anonymous | Yes | Yes, `contents_book` volume listing | net | Yes, to descramble; a missing `sharp` fails the run unless `--no-descramble` |
 
 "Free in full" means a volume the store currently offers to read without paying. It is not the same as a preview, which is what `--download-samplers` handles.
 
@@ -25,8 +26,11 @@ A URL is claimed by the store that owns its host before any pattern is tried, so
 | ebookjapan | `ebookjapan.yahoo.co.jp/books/<title>/<publication>`, `.../books/<title>`, a viewer or title URL, or a bare reading code such as `B000000002`. |
 | Kindle | `read.amazon.co.jp/manga/<asin>`, a product page such as `amazon.co.jp/dp/<asin>`, or a bare ASIN (a `B0` followed by eight characters). |
 | k-manga | `comic.k-manga.jp/title/<id>/vol/<n>`, a `viewer-launcher` link, or `comic.k-manga.jp/title/<id>`. |
+| DMMブックス | a volume viewer (`/product/<series>/<content>/free_streaming/` or the matching `tachiyomi/` sampler), a volume product page `/product/<series>/<content>/`, or a series or latest page `/product/<series>/`, `/product/<series>/volumes/` or `/product/<series>/latest/`. |
 
 A bare ebookjapan publication code (an `A` followed by digits) is refused with a message naming the `/books/<title>/<code>/` URL that does work, because a publication does not name its own title. A bare ten-character `B0...` token is genuinely ambiguous between a Kindle ASIN and an ebookjapan reading code; the registry tries Kindle first, and `tests/test_detect.mjs` pins that choice.
+
+A pasted DMM `free_streaming/` or `tachiyomi/` viewer URL is a single volume and downloads on its own: the sampler route needs neither `--series` nor `--download-samplers`, and no volume listing is fetched first. A volume product page resolves that one volume (or its sampler with `--download-samplers`), and `/product/<series>/latest/` takes the newest volume the listing has, while the `/product/<series>/` and `/product/<series>/volumes/` series pages are refused without `--series`, the same way the other stores' title pages are.
 
 ## Sessions
 
@@ -35,7 +39,7 @@ Only two stores ever need a signed-in session.
 - **BookWalker**: a free volume downloads with no cookies at all. `--bw-cookie` is needed for a title already in your account. The session is split across `viewer.bookwalker.jp` and `member.bookwalker.jp`, so the flag is repeatable and both halves may be required. `--bw-sample`, `--bw-u1`, `--bw-cr`, `--bw-no-cr` and `--bw-entry` are Advanced overrides for the licence handshake.
 - **Kindle**: every volume needs a signed-in `read.amazon.co.jp` session, because an Amazon volume is never public, not even a limited-time-free one. Pass `--kindle-cookie`, or rely on the saved session at `~/.bwdd-cli/kindle-session.json`. Only the Japan store is supported.
 
-CMOA, ebookjapan and k-manga have no account path at all: they are anonymous, free-and-preview stores here.
+CMOA, ebookjapan, k-manga and DMMブックス have no account path here: they are anonymous, free-and-preview stores.
 
 Cookie forms and the state files are covered in [auth.md](auth.md).
 
@@ -50,6 +54,7 @@ Cookie forms and the state files are covered in [auth.md](auth.md).
 | ebookjapan | The title page. | Yes |
 | Kindle | Reads the whole volume list in one `seriesAsinList` request made from the nearest volume that has a store page, then checks access for every volume at once; up to 200 volumes. A volume that is free in full, already in your library, or borrowable through Kindle Unlimited is taken. A Kindle-Unlimited-only volume with no store page is found through a related volume. | Yes, with `--download-samplers` |
 | k-manga | The title page. | Yes |
+| DMMブックス | The `/product/<series>/volumes/` listing (`contents_book`), read to the pager's `total_count`; `/product/<series>/` resolves to the same listing, and a walk that sees fewer volumes than the pager states fails instead of continuing short. Volumes carry `free_streaming_url` only while the free window is open; the rest expose `tachiyomi_url` samplers. | Yes, with `--download-samplers` |
 
 There is no separate series folder. A series download writes one sibling volume folder per volume under `--out`, the same layout as a single-volume run. See [naming.md](naming.md).
 
@@ -64,5 +69,6 @@ A Kindle Unlimited volume is borrowed rather than owned. The CLI borrows it, dow
 - **ebookjapan is CPU-bound.** Its pages are tile-scrambled and rebuilt from the viewer's own WebAssembly, which is why it needs `sharp`. The vendored engine sizes its keep-alive socket pool at import from its own `--concurrency` default of 48, and dokuha runs each volume with 32 page workers by default. Dokuha's `--concurrency N` reaches both; `--eb-concurrency N` alone changes the page workers but not the socket ceiling.
 - **BookWalker needs `sharp` for every volume**, because the vendored engine normalises pages through it. It is the only store with two worker pools (the download and the normalise pool).
 - **k-manga's throughput cap belongs to the store.** It moves by more than five times over minutes and the client cannot raise it, so wall time is not predictable. `--km-concurrency` sets requests outstanding per viewer socket, 1 to 32; a long volume opens up to four sockets.
+- **DMM pages are tile-scrambled.** The CDN JPEG is a 64×64 shuffle keyed by the page path, and `sharp` rebuilds it. Without `sharp` the run fails with the install line rather than writing a chessboard; `--no-descramble` is the deliberate way to keep the shuffled bytes. DMM signs its CDN with CloudFront cookies (free volumes) or `auth_info` query parameters (samples), and both expire quickly: a 403 on a page or on `configuration_pack.json` refreshes the auth once and retries. `--dmm-concurrency` defaults to 16 and caps at 32 because the store throttles with 429s, and `--retries` sets the per-page attempt budget.
 - **Retries are a bounded per-page budget, not adaptive backoff across the run.** A failed volume does not stop the batch, and re-running the same command skips what is already on disk.
 - **Store changes will break a store.** These are undocumented viewer APIs. When a store changes its viewer, that adapter stops working until it is updated.
